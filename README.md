@@ -9,7 +9,7 @@ adds three things on top of your normal desktop:
   launches the app or jumps to its window.
 - **A top bar** across the top of the screen, showing the active app's name,
   battery level and the clock.
-- **quick search** — press Alt+Space (or Ctrl+Space), type an app name,
+- **Quick search** — press Alt+Space (or Ctrl+Space), type an app name,
   press Enter to launch it.
 
 Right-click the dock for more: show or hide the top bar, auto-hide the
@@ -47,7 +47,7 @@ src/
   Program.cs        startup, single-instance check, wires the three windows together
   DockForm.cs       the dock — custom-painted icons, magnification, running dots
   TopBarForm.cs     the top bar — active app name, battery, clock
-  quick searchForm.cs  quick search over Start Menu apps
+  QuickSearchForm.cs  quick search over Start Menu apps
   DockApps.cs       finding pinned apps and their icons on the machine
   NativeMethods.cs  the few Windows API calls (hotkeys, taskbar auto-hide)
 ```
