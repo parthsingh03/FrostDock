@@ -40,6 +40,9 @@ Smart App Control only trusts apps signed with a valid certificate. Signed
 releases are published here when available; until then, the source code in
 this repo is fully open so anyone can read it and build it themselves.
 
+How FrostDock releases are signed is described in
+[docs/CODE-SIGNING-POLICY.md](docs/CODE-SIGNING-POLICY.md).
+
 ## Project layout
 
 ```
