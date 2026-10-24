@@ -1,0 +1,31 @@
+name: Build FrostDock
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Publish FrostDock.exe
+        run: >
+          dotnet publish src/FrostDock.csproj -c Release -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -o publish
+      - name: Upload FrostDock.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: FrostDock.exe
+          path: publish/FrostDock.exe
