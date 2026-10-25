@@ -14,6 +14,8 @@ internal sealed class DockApp
     public string? ProcessName { get; init; }
     /// <summary>Path used only to extract the icon, when LaunchTarget is a shell target.</summary>
     public string? IconPath { get; init; }
+    /// <summary>Store/UWP AUMID (e.g. "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"), when known.</summary>
+    public string? AumidHint { get; init; }
     public Bitmap? IconBitmap { get; set; }
 
     public Process? RunningProcess
@@ -137,15 +139,19 @@ internal static class DockAppDiscovery
             Name = "Calculator",
             LaunchTarget = "calc.exe",
             ProcessName = "CalculatorApp",
-            IconPath = Path.Combine(sys, "calc.exe")
+            IconPath = Path.Combine(sys, "calc.exe"),
+            // Well-known AUMID for the Store Calculator: its real icon lives here,
+            // not in the calc.exe stub (which yields the old monochrome glyph).
+            AumidHint = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
         });
 
+        var settingsExe = Path.Combine(win, "ImmersiveControlPanel", "SystemSettings.exe");
         apps.Add(new DockApp
         {
             Name = "Settings",
             LaunchTarget = "ms-settings:",
             ProcessName = "SystemSettings",
-            IconPath = Path.Combine(sys, "imageres.dll")
+            IconPath = File.Exists(settingsExe) ? settingsExe : Path.Combine(sys, "imageres.dll")
         });
 
         foreach (var a in apps) a.IconBitmap = IconHelper.GetAppIcon(a);
@@ -153,67 +159,57 @@ internal static class DockAppDiscovery
     }
 }
 
+/// <summary>
+/// v1.1 icon path: IShellItemImageFactory at 256px (alpha preserved), AUMID
+/// first when known, .lnk targets resolved. No letter tiles anywhere: the
+/// only fallback is ShellIcons.GenericIcon, a neutral tile for apps whose
+/// icon genuinely cannot be resolved.
+/// </summary>
 internal static class IconHelper
 {
-    public static Bitmap? GetAppIcon(DockApp app)
+    public static Bitmap GetAppIcon(DockApp app)
     {
+        // AUMID first when known: the Store app's real icon lives there, not
+        // in its stub exe (calc.exe yields the old monochrome glyph).
+        if (!string.IsNullOrWhiteSpace(app.AumidHint))
+        {
+            var fromAumid = ShellIcons.GetImageForParsingName("shell:AppsFolder\\" + app.AumidHint);
+            if (fromAumid != null) return fromAumid;
+        }
+
         string? path = app.IconPath;
-        if (path != null && File.Exists(path) && path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(path))
         {
             try
             {
-                using var icon = Icon.ExtractAssociatedIcon(path);
-                if (icon != null)
+                if (path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) && File.Exists(path))
+                    path = ShellIcons.ResolveLinkTarget(path);
+                if (!string.IsNullOrWhiteSpace(path))
                 {
-                    var bmp = icon.ToBitmap();
-                    return RoundCorners(bmp, 96);
+                    var bmp = ShellIcons.GetImageForParsingName(path);
+                    if (bmp != null) return bmp;
                 }
             }
             catch { }
         }
-        return GlyphIcon(app.Name);
+
+        return ShellIcons.GenericIcon();
     }
 
-    /// <summary>Original fallback icon: gradient rounded square with the app's initial.</summary>
-    public static Bitmap GlyphIcon(string name)
+    /// <summary>Display name for a process name (shared with the top bar).</summary>
+    public static string FriendlyAppName(string processName)
     {
-        const int s = 96;
-        var bmp = new Bitmap(s, s);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var rect = new Rectangle(2, 2, s - 4, s - 4);
-        using var path = RoundedRect(rect, 22);
-        using var brush = new LinearGradientBrush(rect, Color.FromArgb(90, 170, 255), Color.FromArgb(40, 90, 220), 45f);
-        g.FillPath(brush, path);
-        string letter = string.IsNullOrEmpty(name) ? "?" : name[..1].ToUpperInvariant();
-        using var font = new Font("Segoe UI", 40f, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        g.DrawString(letter, font, Brushes.White, rect, sf);
-        return bmp;
-    }
-
-    public static Bitmap RoundCorners(Bitmap src, int size)
-    {
-        var bmp = new Bitmap(size, size);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        var rect = new Rectangle(0, 0, size, size);
-        using var path = RoundedRect(rect, size / 4);
-        g.SetClip(path);
-        g.DrawImage(src, rect);
-        return bmp;
-    }
-
-    public static GraphicsPath RoundedRect(Rectangle rect, int radius)
-    {
-        var path = new GraphicsPath();
-        int d = radius * 2;
-        path.AddArc(rect.X, rect.Y, d, d, 180, 90);
-        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
-        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
+        return processName switch
+        {
+            "explorer" => "File Explorer",
+            "Code" => "Visual Studio Code",
+            "msedge" => "Microsoft Edge",
+            "chrome" => "Google Chrome",
+            "WindowsTerminal" => "Terminal",
+            "CalculatorApp" => "Calculator",
+            "SystemSettings" => "Settings",
+            "notepad" => "Notepad",
+            _ => processName
+        };
     }
 }

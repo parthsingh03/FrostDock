@@ -23,7 +23,7 @@ internal sealed class QuickSearchForm : Form
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         BackColor = Color.FromArgb(34, 34, 40);
-        Opacity = 0.97;
+        // No Opacity: acrylic (applied in OnLoad) provides the translucency.
         Width = 640;
         Height = 420;
 
@@ -56,6 +56,14 @@ internal sealed class QuickSearchForm : Form
 
         LoadApps();
         ApplyFilter();
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        // Acrylic blur: safe here because the blurred region is 100% of this
+        // window's rectangle (unlike the taller dock form).
+        NativeMethods.EnableAcrylic(Handle, unchecked((int)0xE6282222));
     }
 
     private void LoadApps()

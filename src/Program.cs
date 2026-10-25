@@ -20,12 +20,21 @@ internal static class Program
             if (quickSearch.Visible) quickSearch.Hide();
             else quickSearch.ShowSearch();
         };
-        dock.ToggleTopBarRequested += (_, _) => topBar.Visible = !topBar.Visible;
+        // Hiding the top bar must also release its AppBar workspace
+        // reservation, and showing it must reserve it again.
+        dock.ToggleTopBarRequested += (_, _) =>
+        {
+            if (topBar.Visible) topBar.HideBar();
+            else topBar.ShowBar();
+        };
         dock.ExitRequested += (_, _) =>
         {
             dock.RestoreTaskbar();
+            topBar.UnregisterAppBar();
             Application.Exit();
         };
+        // Backstop for any other exit path: unregistering is idempotent.
+        Application.ApplicationExit += (_, _) => topBar.UnregisterAppBar();
 
         dock.Show();
         topBar.Show();

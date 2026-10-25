@@ -10,7 +10,7 @@
     <AssemblyName>FrostDock</AssemblyName>
     <RootNamespace>FrostDock</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Parth Singh</Authors>
     <Description>FrostDock - a macOS-style dock, top bar and Quick search for Windows. All original code.</Description>
   </PropertyGroup>
