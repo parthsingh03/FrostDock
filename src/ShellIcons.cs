@@ -34,8 +34,28 @@ internal static class ShellIcons
 
     private const int IconPx = 256;
 
-    /// <summary>Best-effort 256px icon for a parsing name (file path or shell:AppsFolder AUMID).</summary>
+    /// <summary>
+    /// Best-effort 256px icon for a parsing name (file path or shell:AppsFolder AUMID).
+    /// v1.5: retries inside the factory path before giving up — some Store
+    /// apps fail ICONONLY at 256px but succeed without it or at 64px. A null
+    /// here still means "try the classic fallback", never "show generic yet".
+    /// </summary>
     public static Bitmap? GetImageForParsingName(string parsingName)
+    {
+        foreach (var (px, flags) in new[]
+        {
+            (256, SIIGBF.BIGGERSIZEOK | SIIGBF.ICONONLY),
+            (256, SIIGBF.BIGGERSIZEOK),
+            (64, SIIGBF.BIGGERSIZEOK | SIIGBF.ICONONLY),
+        })
+        {
+            var bmp = TryFactoryImage(parsingName, px, flags);
+            if (bmp != null) return bmp;
+        }
+        return null;
+    }
+
+    private static Bitmap? TryFactoryImage(string parsingName, int px, SIIGBF flags)
     {
         IShellItemImageFactory? factory = null;
         IntPtr hBitmap = IntPtr.Zero;
@@ -44,8 +64,7 @@ internal static class ShellIcons
             var iid = IID_ShellItemImageFactory;
             int hr = NativeMethods.SHCreateItemFromParsingName(parsingName, IntPtr.Zero, ref iid, out factory);
             if (hr != 0 || factory == null) return null;
-            hr = factory.GetImage(new NativeMethods.SIZE { cx = IconPx, cy = IconPx },
-                SIIGBF.BIGGERSIZEOK | SIIGBF.ICONONLY, out hBitmap);
+            hr = factory.GetImage(new NativeMethods.SIZE { cx = px, cy = px }, flags, out hBitmap);
             if (hr != 0 || hBitmap == IntPtr.Zero) return null;
             return HBitmapToBitmapAlpha(hBitmap);
         }
@@ -61,6 +80,24 @@ internal static class ShellIcons
                 try { Marshal.ReleaseComObject(factory); } catch { }
             }
         }
+    }
+
+    /// <summary>
+    /// v1.5 classic fallback: the stock 32px associated icon for a real file
+    /// path (Icon.ExtractAssociatedIcon). Slightly soft when upscaled, but a
+    /// REAL app icon — far better than the generic tile. Null when the path
+    /// has no associated icon (e.g. a shell: parsing name, not a file).
+    /// </summary>
+    public static Bitmap? ClassicIcon(string filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return null;
+            using var icon = Icon.ExtractAssociatedIcon(filePath);
+            if (icon == null) return null;
+            return icon.ToBitmap();
+        }
+        catch { return null; }
     }
 
     /// <summary>

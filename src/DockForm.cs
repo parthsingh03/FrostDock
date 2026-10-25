@@ -55,6 +55,8 @@ internal sealed class DockForm : Form
     private int _originalTaskbarState;
     private bool _taskbarTouched;
     private Rectangle _pillRect = Rectangle.Empty;
+    // v1.5: true while a Launchpad drag hovers the dock pill (drop highlight).
+    private bool _dropHighlight;
     // v1.4 launch animation + user pins.
     private readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 30 };
     private int _bounceIndex = -1;
@@ -215,6 +217,27 @@ internal sealed class DockForm : Form
     public void SetUserPinPaths(IEnumerable<string> paths)
     {
         foreach (var p in paths) _userPinPaths.Add(p);
+    }
+
+    /// <summary>
+    /// v1.5: highlights (or clears) the dock pill as a drag-drop target.
+    /// Called by Launchpad mid-drag; repaints only on change.
+    /// </summary>
+    public void SetDropHighlight(bool on)
+    {
+        if (_dropHighlight == on) return;
+        _dropHighlight = on;
+        RenderDock();
+    }
+
+    /// <summary>
+    /// v1.5: brings the dock above Launchpad during a drag WITHOUT stealing
+    /// activation (both are TopMost; plain BringToFront could steal focus
+    /// from the drag). Used by the host when a Launchpad drag starts.
+    /// </summary>
+    public void BringToFrontNoActivate()
+    {
+        try { NativeMethods.BringToFrontNoActivate(Handle); } catch { }
     }
 
     /// <summary>Screen rectangle of the dock pill (the drag-drop target, not the whole form).</summary>
@@ -427,6 +450,26 @@ internal sealed class DockForm : Form
         int idx = HitTest(e.Location);
         if (idx < 0 || idx >= _display.Count) return;
         var app = _display[idx];
+        // v1.5 genie toggle — DOCK CLICKS ONLY (titlebar "-" untouched):
+        // a running app's dock icon toggles it: foreground window →
+        // genie minimize, minimized window → genie restore. Explorer
+        // (always opens a new window) and special actions (Launchpad,
+        // Trash) keep their v1.4 behavior; a running-but-background app
+        // still just comes to the foreground below.
+        if (!app.IsExplorer && app.SpecialAction == null)
+        {
+            var running = app.RunningProcess;
+            if (running != null && running.MainWindowHandle != IntPtr.Zero)
+            {
+                var h = running.MainWindowHandle;
+                var r = idx < _iconRects.Count ? _iconRects[idx] : Rectangle.Empty;
+                var iconCenter = r == Rectangle.Empty
+                    ? new Point(Location.X + Width / 2, Location.Y + FormHeight - 40)
+                    : new Point(Location.X + r.X + r.Width / 2, Location.Y + r.Y + r.Height / 2);
+                if (NativeMethods.IsIconic(h)) { GenieEffect.Restore(h, iconCenter); return; }
+                if (NativeMethods.GetForegroundWindow() == h) { GenieEffect.Minimize(h, iconCenter); return; }
+            }
+        }
         // v1.4 bounce on LAUNCH only, not on focus: bounce when the app was
         // not running — plus Explorer, which always opens a new window.
         bool wasRunning = app.IsRunning;
@@ -784,6 +827,15 @@ internal sealed class DockForm : Form
                     LinearGradientMode.Vertical))
                     g.FillRectangle(gloss, new Rectangle(pill.X, pill.Y, pill.Width, 14));
                 g.Restore(gs);
+                // v1.5 drop-target highlight: a bright wash + 2px outline so
+                // the user can SEE the pill is ready to accept the drop.
+                if (_dropHighlight)
+                {
+                    using var wash = new SolidBrush(Color.FromArgb(70, 255, 255, 255));
+                    g.FillPath(wash, bg);
+                    using var edge = new Pen(Color.FromArgb(220, 255, 255, 255), 2f);
+                    g.DrawPath(edge, bg);
+                }
             }
 
             // Icons, running dots, separators. The WHOLE icon magnifies.

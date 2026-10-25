@@ -31,6 +31,64 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr hWnd);
 
+    // ---- v1.5 genie minimize/restore + drag z-order helpers ----
+    public const int SW_MINIMIZE = 6;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    // PrintWindow: PW_RENDERFULLCONTENT asks the target to render its full
+    // content into our DC (needed for windows that don't paint on demand).
+    public const uint PW_RENDERFULLCONTENT = 0x00000002;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+    // Z-order without activation: reasserts HWND_TOPMOST without stealing
+    // focus from the window the user is interacting with (a drag, here).
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOACTIVATE = 0x0010;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int x, int y, int cx, int cy, uint uFlags);
+
+    public static void BringToFrontNoActivate(IntPtr hWnd)
+    {
+        try { SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
+        catch { /* z-order is cosmetic - never crash over it */ }
+    }
+
+    // DWMWA_TRANSITIONS_FORCEDISABLED (3): suppresses the OS minimize /
+    // restore animation for one window while the genie overlay plays, so
+    // the two animations never double up. Set before the effect, cleared
+    // after restore (and on clean exit as a backstop). If the target
+    // process rejects the cross-process call, the effect still plays and
+    // the native animation may double — cosmetic only, minimize still works.
+    public const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
+
+    [DllImport("dwmapi.dll", PreserveSig = true)]
+    public static extern int DwmSetWindowAttribute(IntPtr hWnd, int dwAttribute,
+        ref int pvAttribute, int cbAttribute);
+
+    // Minimized windows report an off-screen rect from GetWindowRect, so
+    // the restore effect reads the restored rect from GetWindowPlacement.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT
+    {
+        public uint length;
+        public uint flags;
+        public uint showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 

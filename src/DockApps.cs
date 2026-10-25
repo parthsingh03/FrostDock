@@ -216,11 +216,26 @@ internal static class IconHelper
         {
             try
             {
+                // v1.5 chain: factory(resolved target) → classic(target) →
+                // factory(.lnk path itself) → classic(.lnk path) → generic.
+                // v1.4 stopped after the factory, so any extraction failure
+                // showed the generic tile even when a real icon existed.
+                string? target = path;
                 if (path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) && File.Exists(path))
-                    path = ShellIcons.ResolveLinkTarget(path);
-                if (!string.IsNullOrWhiteSpace(path))
                 {
-                    var bmp = ShellIcons.GetImageForParsingName(path);
+                    string resolved = ShellIcons.ResolveLinkTarget(path);
+                    if (!string.IsNullOrWhiteSpace(resolved)) target = resolved;
+                }
+                if (!string.IsNullOrWhiteSpace(target))
+                {
+                    var bmp = ShellIcons.GetImageForParsingName(target)
+                        ?? ShellIcons.ClassicIcon(target);
+                    if (bmp != null) return bmp;
+                }
+                if (!string.Equals(target, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    var bmp = ShellIcons.GetImageForParsingName(path)
+                        ?? ShellIcons.ClassicIcon(path);
                     if (bmp != null) return bmp;
                 }
             }

@@ -138,7 +138,11 @@ internal sealed class ControlCenterForm : Form
 
     private void RefreshValues()
     {
-        _volumeValue = AudioVolume.TryGet(out float level) ? (int)Math.Round(level * 100) : -1;
+        // v1.5 hardening: volume must NEVER crash the app again. Even a
+        // poisoned AudioVolume type (TypeInitializationException) degrades
+        // to the "n/a + reason" display instead of an unhandled dialog.
+        try { _volumeValue = AudioVolume.TryGet(out float level) ? (int)Math.Round(level * 100) : -1; }
+        catch { _volumeValue = -1; }
         _brightValue = BrightnessControl.TryGet(out byte bright) ? bright : -1;
 
         try
@@ -228,7 +232,7 @@ internal sealed class ControlCenterForm : Form
         if (isVolume)
         {
             _volumeValue = v;
-            AudioVolume.TrySet(v / 100f);
+            try { AudioVolume.TrySet(v / 100f); } catch { /* volume is best-effort */ }
         }
         else
         {
@@ -321,8 +325,10 @@ internal sealed class ControlCenterForm : Form
         // (never a bare "n/a" — the old text was too narrow to read here).
         if (_volumeValue < 0)
         {
-            string reason = string.IsNullOrWhiteSpace(AudioVolume.LastError)
-                ? "No audio device found" : AudioVolume.LastError;
+            // v1.5: LastError is a static access too — never let paint throw.
+            string reason;
+            try { reason = string.IsNullOrWhiteSpace(AudioVolume.LastError) ? "No audio device found" : AudioVolume.LastError; }
+            catch { reason = "No audio device found"; }
             g.DrawString(reason, smallFont, dim, new PointF(100, y + 26));
         }
         y += 44;

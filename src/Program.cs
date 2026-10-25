@@ -40,11 +40,18 @@ internal static class Program
         // v1.4 wiring: drag-to-pin, drop target, zoom origin, bounce hints.
         launchpad.PinDropped += (_, item) => dock.PinApp(item);
         launchpad.GetDockRect = () => dock.PillScreenRect;
+        // v1.5 wiring: during a drag the dock comes above Launchpad (so the
+        // drop target is visible) and its pill highlights on hover.
+        launchpad.DragRevealDockRequested += (_, _) => dock.BringToFrontNoActivate();
+        launchpad.SetDockDropHighlight = on => dock.SetDropHighlight(on);
         launchpad.AppLaunched += (_, name) => dock.RequestBounce(name);
         quickSearch.AppLaunched += (_, name) => dock.RequestBounce(name);
 
         void ExitAll()
         {
+            // v1.5 backstop: clear any genie transition-suppression flags so
+            // a clean exit never leaves another window's animations off.
+            GenieEffect.RestoreAllTransitions();
             dock.RestoreTaskbar();
             topBar.UnregisterAppBar();
             Application.Exit();
@@ -75,7 +82,11 @@ internal static class Program
         };
         topBar.ControlCenterRequested += (_, _) => controlCenter.TogglePanel();
         // Backstop for any other exit path: unregistering is idempotent.
-        Application.ApplicationExit += (_, _) => topBar.UnregisterAppBar();
+        Application.ApplicationExit += (_, _) =>
+        {
+            topBar.UnregisterAppBar();
+            GenieEffect.RestoreAllTransitions();
+        };
 
         dock.Show();
         topBar.Show();

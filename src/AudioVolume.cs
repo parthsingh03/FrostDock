@@ -22,9 +22,24 @@ internal static class AudioVolume
     /// <summary>Human-readable reason for the last TryGet/TrySet failure; empty on success.</summary>
     public static string LastError { get; private set; } = string.Empty;
 
-    private static readonly Guid CLSID_MMDeviceEnumerator = new("BCDE0395-E52F-467C-8E3D-C4579291692");
-    private static readonly Guid IID_MMDeviceEnumerator = new("A95664D2-9614-4F35-A746-DE8DB63617E6");
-    private static readonly Guid IID_AudioEndpointVolume = new("5CDF2C82-841E-4546-9722-0CF74078229A");
+    // v1.5 FIX: the v1.2–v1.4 CLSID literal was missing its final hex digit
+    // ("...C4579291692", 11 digits in the last group), so the type initializer
+    // threw FormatException on FIRST use — which is why volume was ALWAYS
+    // "n/a" since v1.2 (earlier versions swallowed it; v1.4 surfaced it as
+    // the unhandled-exception dialog). The true CLSID ends "...C4579291692E".
+    // All three Guids below are built with TryParse so a bad literal can
+    // NEVER throw from the static initializer again: worst case the value
+    // is Guid.Empty, CoCreateInstance fails gracefully, and TryGet reports
+    // "No audio device found" instead of crashing the app.
+    private static readonly Guid CLSID_MMDeviceEnumerator = ParseGuid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+    private static readonly Guid IID_MMDeviceEnumerator = ParseGuid("A95664D2-9614-4F35-A746-DE8DB63617E6");
+    private static readonly Guid IID_AudioEndpointVolume = ParseGuid("5CDF2C82-841E-4546-9722-0CF74078229A");
+
+    private static Guid ParseGuid(string text)
+    {
+        try { return Guid.TryParse(text, out var g) ? g : Guid.Empty; }
+        catch { return Guid.Empty; }
+    }
 
     [DllImport("ole32.dll", PreserveSig = false)]
     private static extern void CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter, uint dwClsContext,

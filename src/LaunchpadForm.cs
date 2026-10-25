@@ -53,6 +53,8 @@ internal sealed class LaunchpadForm : Form
     private bool _dragging;
     private bool _suppressClick;
     private Form? _ghost;
+    // v1.5: last hover-over-dock state, so the pill highlight only repaints on change.
+    private bool _overDock;
     private readonly System.Windows.Forms.Timer _dragTimer = new() { Interval = 30 };
     // v1.4 zoom in/out state (scale applied in OnPaint, fade via Opacity).
     private readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 16 };
@@ -69,6 +71,14 @@ internal sealed class LaunchpadForm : Form
     public event EventHandler<string>? AppLaunched;
     /// <summary>Set by the host: the dock's screen rectangle (drop target).</summary>
     public Func<Rectangle>? GetDockRect { get; set; }
+    /// <summary>
+    /// v1.5: fired when a drag starts. The host brings the dock ABOVE
+    /// Launchpad (both are TopMost; Launchpad opened later, so it normally
+    /// hides the dock — the reported "dock does not appear to drop").
+    /// </summary>
+    public event EventHandler? DragRevealDockRequested;
+    /// <summary>v1.5: set by the host to highlight the dock pill while the cursor hovers the drop rect mid-drag.</summary>
+    public Action<bool>? SetDockDropHighlight { get; set; }
     /// <summary>Set by the host before ShowLaunchpad: the dock icon's screen position (zoom origin).</summary>
     public Point ZoomOriginScreen = Point.Empty;
 
@@ -308,16 +318,27 @@ internal sealed class LaunchpadForm : Form
         Bitmap? bmp = null;
         try
         {
-            // v1.4: AppsFolder items resolve directly via their parsing name
-            // (same path the dock uses for AUMID icons); .lnk items resolve
-            // to their target first.
+            // v1.5 fallback chain — the generic tile is ONLY the last resort.
+            // v1.4 fell straight to GenericIcon() when the factory failed,
+            // which is why Claude, WhatsApp, Explorer, Control Panel, Run…
+            // all showed the 4-square tile. Chain per item kind:
+            //   shell:AppsFolder item → factory (with internal retries)
+            //   .lnk item → factory(resolved target) → classic(target)
+            //              → factory(.lnk path itself) → classic(.lnk path)
             if (item.Path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase))
+            {
                 bmp = ShellIcons.GetImageForParsingName(item.Path);
+            }
             else
             {
                 string target = ShellIcons.ResolveLinkTarget(item.Path);
                 if (!string.IsNullOrWhiteSpace(target))
-                    bmp = ShellIcons.GetImageForParsingName(target);
+                {
+                    bmp = ShellIcons.GetImageForParsingName(target)
+                        ?? ShellIcons.ClassicIcon(target);
+                }
+                bmp ??= ShellIcons.GetImageForParsingName(item.Path)
+                    ?? ShellIcons.ClassicIcon(item.Path);
             }
         }
         catch { }
@@ -409,6 +430,10 @@ internal sealed class LaunchpadForm : Form
             pe.Graphics.DrawImage(icon, new Rectangle(4, 4, 64, 64));
         };
         _ghost = ghost;
+        // v1.5: reveal the dock BEFORE the ghost appears — the host brings
+        // the dock above Launchpad so the drop target is actually visible.
+        _overDock = false;
+        try { DragRevealDockRequested?.Invoke(this, EventArgs.Empty); } catch { }
         var pos = Cursor.Position;
         ghost.Location = new Point(pos.X - 36, pos.Y - 36);
         ghost.Show();
@@ -428,21 +453,44 @@ internal sealed class LaunchpadForm : Form
             _ghost = null;
             _dragging = false;
             _dragItem = null;
+            // v1.5: always clear the pill highlight when the drag ends.
+            if (_overDock) { _overDock = false; try { SetDockDropHighlight?.Invoke(false); } catch { } }
+            bool dropped = false;
             if (item != null && GetDockRect != null)
             {
                 try
                 {
                     if (GetDockRect().Contains(pos))
                     {
+                        dropped = true;
                         PinDropped?.Invoke(this, item);
                         CloseAnimated();
                     }
                 }
                 catch { }
             }
+            // v1.5: on cancel, Launchpad returns above the dock (the drag
+            // had brought the dock forward); on drop, CloseAnimated already
+            // closes Launchpad, so nothing to restore.
+            if (!dropped)
+            {
+                try { NativeMethods.BringToFrontNoActivate(Handle); } catch { }
+            }
             return;
         }
         var cur = Cursor.Position;
+        // v1.5 hover feedback: highlight the dock pill while the cursor is
+        // over the drop rect, so the user can SEE where to release.
+        try
+        {
+            bool over = GetDockRect != null && GetDockRect().Contains(cur);
+            if (over != _overDock)
+            {
+                _overDock = over;
+                SetDockDropHighlight?.Invoke(over);
+            }
+        }
+        catch { }
         _ghost.Location = new Point(cur.X - 36, cur.Y - 36);
     }
 
