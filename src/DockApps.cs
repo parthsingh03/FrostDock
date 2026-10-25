@@ -41,13 +41,35 @@ internal sealed class DockApp
         }
     }
 
-    public bool IsRunning => RunningProcess != null;
+    /// <summary>
+    /// v1.4: explorer.exe is the Windows shell — it ALWAYS runs, so the
+    /// generic focus-first rule is a trap for it: clicking Explorer would
+    /// just foreground the shell/desktop and never open a window (and the
+    /// running dot would be permanently on). Explorer is special-cased
+    /// everywhere below: always launch, dot only for a real folder window.
+    /// </summary>
+    public bool IsExplorer => ProcessName != null &&
+        ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase);
+
+    public bool IsRunning => IsExplorer ? NativeMethods.ExplorerWindowOpen() : RunningProcess != null;
 
     public void LaunchOrFocus()
     {
         if (SpecialAction != null)
         {
             try { SpecialAction(); } catch { }
+            return;
+        }
+        // v1.4 Explorer special-case: NEVER focus-first — always open a
+        // new File Explorer window. Focusing the always-running shell
+        // process visibly does nothing, which was the reported bug.
+        if (IsExplorer)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = LaunchTarget, UseShellExecute = true });
+            }
+            catch { }
             return;
         }
         try

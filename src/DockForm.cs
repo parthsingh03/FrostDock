@@ -55,6 +55,14 @@ internal sealed class DockForm : Form
     private int _originalTaskbarState;
     private bool _taskbarTouched;
     private Rectangle _pillRect = Rectangle.Empty;
+    // v1.4 launch animation + user pins.
+    private readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 30 };
+    private int _bounceIndex = -1;
+    private DateTime _bounceT0 = DateTime.MinValue;
+    private string? _pendingBounce;
+    private DateTime _pendingBounceSince = DateTime.MinValue;
+    private readonly List<(Point Center, DateTime T0)> _flashes = new();
+    private readonly HashSet<string> _userPinPaths = new(StringComparer.OrdinalIgnoreCase);
 
     public event EventHandler? ShowSearchRequested;
     public event EventHandler? ToggleTopBarRequested;
@@ -90,9 +98,11 @@ internal sealed class DockForm : Form
         // No BackColor/Opacity/Region: a layered window's appearance comes
         // entirely from the bitmap pushed with UpdateLayeredWindow.
         Height = FormHeight;
-        BuildContextMenu();
+        // v1.4: the context menu is built fresh on each right-click (so a
+        // user-pinned icon can offer Unpin); nothing is assigned here.
         _refreshTimer.Tick += (_, _) => { RefreshRunning(); RenderDock(); };
         _refreshTimer.Start();
+        _animTimer.Tick += (_, _) => AnimTick();
         Recenter();
     }
 
@@ -108,9 +118,21 @@ internal sealed class DockForm : Form
         }
     }
 
-    private void BuildContextMenu()
+    /// <summary>
+    /// v1.4: built fresh on every right-click. A user-pinned icon (dragged
+    /// from Launchpad) gets an "Unpin from dock" entry on top; built-in
+    /// defaults never do — they cannot be unpinned.
+    /// </summary>
+    private ContextMenuStrip BuildContextMenu(DockApp? target)
     {
         var menu = new ContextMenuStrip();
+        if (target != null && _userPinPaths.Contains(target.LaunchTarget))
+        {
+            var unpin = new ToolStripMenuItem("Unpin from dock");
+            unpin.Click += (_, _) => UnpinApp(target);
+            menu.Items.Add(unpin);
+            menu.Items.Add(new ToolStripSeparator());
+        }
         var quickSearch = new ToolStripMenuItem("Quick search (Alt+Space)");
         quickSearch.Click += (_, _) => ShowSearchRequested?.Invoke(this, EventArgs.Empty);
         var launchpad = new ToolStripMenuItem("Launchpad (F4)");
@@ -118,7 +140,7 @@ internal sealed class DockForm : Form
         menu.Items.Add(launchpad);
         var topBar = new ToolStripMenuItem("Show / hide top bar");
         topBar.Click += (_, _) => ToggleTopBarRequested?.Invoke(this, EventArgs.Empty);
-        var autoHide = new ToolStripMenuItem("Auto-hide Windows taskbar") { CheckOnClick = true };
+        var autoHide = new ToolStripMenuItem("Auto-hide Windows taskbar") { CheckOnClick = true, Checked = _autoHideTaskbar };
         autoHide.Click += (_, _) => SetAutoHideTaskbar(autoHide.Checked);
         menu.Items.Add(quickSearch);
         menu.Items.Add(topBar);
@@ -127,7 +149,134 @@ internal sealed class DockForm : Form
         var exit = new ToolStripMenuItem("Exit FrostDock");
         exit.Click += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
         menu.Items.Add(exit);
-        ContextMenuStrip = menu;
+        return menu;
+    }
+
+    /// <summary>Converts a user pin (Launchpad item / pinned.json entry) to a DockApp.</summary>
+    public static DockApp DockAppFromPin(string name, string path)
+    {
+        string? aumid = null;
+        string? iconPath = null;
+        string? processName = null;
+        if (path.StartsWith("shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase))
+        {
+            aumid = path["shell:AppsFolder\\".Length..];
+        }
+        else
+        {
+            iconPath = path;
+            try
+            {
+                string target = ShellIcons.ResolveLinkTarget(path);
+                processName = Path.GetFileNameWithoutExtension(
+                    string.IsNullOrWhiteSpace(target) ? path : target);
+            }
+            catch { }
+        }
+        var app = new DockApp
+        {
+            Name = name,
+            LaunchTarget = path,
+            AumidHint = aumid,
+            IconPath = iconPath,
+            ProcessName = processName
+        };
+        app.IconBitmap = IconHelper.GetAppIcon(app);
+        return app;
+    }
+
+    /// <summary>Pins a Launchpad item to the dock (drop handler) + persists it.</summary>
+    public void PinApp(LaunchpadForm.LaunchItem item)
+    {
+        foreach (var a in _pinned)
+        {
+            if (a.LaunchTarget.Equals(item.Path, StringComparison.OrdinalIgnoreCase) ||
+                a.Name.Equals(item.Name, StringComparison.OrdinalIgnoreCase)) return;
+        }
+        var app = DockAppFromPin(item.Name, item.Path);
+        _pinned.Add(app);
+        _userPinPaths.Add(item.Path);
+        PinnedStore.Add(new PinnedEntry(item.Name, item.Path, item.Path, app.ProcessName ?? string.Empty));
+        RefreshRunning();
+        RenderDock();
+    }
+
+    /// <summary>Removes a user pin from the dock + the pins file. Built-in defaults ignore this.</summary>
+    public void UnpinApp(DockApp app)
+    {
+        if (!_userPinPaths.Contains(app.LaunchTarget)) return;
+        _pinned.Remove(app);
+        _userPinPaths.Remove(app.LaunchTarget);
+        PinnedStore.Remove(app.LaunchTarget);
+        RefreshRunning();
+        RenderDock();
+    }
+
+    public void SetUserPinPaths(IEnumerable<string> paths)
+    {
+        foreach (var p in paths) _userPinPaths.Add(p);
+    }
+
+    /// <summary>Screen rectangle of the dock pill (the drag-drop target, not the whole form).</summary>
+    public Rectangle PillScreenRect => _pillRect == Rectangle.Empty
+        ? new Rectangle(Location, Size)
+        : new Rectangle(Location.X + _pillRect.X, Location.Y + _pillRect.Y, _pillRect.Width, _pillRect.Height);
+
+    /// <summary>Screen center of the Launchpad dock icon (zoom origin for Launchpad open).</summary>
+    public Point LaunchpadIconScreenCenter
+    {
+        get
+        {
+            int i = _display.IndexOf(_launchpadApp);
+            if (i >= 0 && i < _iconRects.Count)
+            {
+                var r = _iconRects[i];
+                return new Point(Location.X + r.X + r.Width / 2, Location.Y + r.Y + r.Height / 2);
+            }
+            return new Point(Location.X + Width / 2, Location.Y + FormHeight - 40);
+        }
+    }
+
+    /// <summary>Asks the dock to bounce an icon once its process shows up (launches from Launchpad/Quick Search).</summary>
+    public void RequestBounce(string processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName)) return;
+        _pendingBounce = processName;
+        _pendingBounceSince = DateTime.UtcNow;
+    }
+
+    private void StartBounce(int index)
+    {
+        if (index < 0 || index >= _display.Count || index >= _iconRects.Count) return;
+        _bounceIndex = index;
+        _bounceT0 = DateTime.UtcNow;
+        var r = _iconRects[index];
+        _flashes.Add((new Point(r.X + r.Width / 2, r.Y + r.Height / 2), DateTime.UtcNow));
+        _animTimer.Start();
+    }
+
+    /// <summary>
+    /// 30ms animation tick: settles the bounce when the app's main window
+    /// appears or after ~3s, prunes expired flashes, re-renders while any
+    /// animation is alive. Stops itself when idle so it costs nothing.
+    /// </summary>
+    private void AnimTick()
+    {
+        var now = DateTime.UtcNow;
+        if (_bounceIndex >= 0)
+        {
+            double elapsed = (now - _bounceT0).TotalMilliseconds;
+            bool settled = elapsed > 3000;
+            if (!settled && _bounceIndex < _display.Count)
+            {
+                var proc = _display[_bounceIndex].RunningProcess;
+                if (proc != null && proc.MainWindowHandle != IntPtr.Zero) settled = true;
+            }
+            if (settled) _bounceIndex = -1;
+        }
+        _flashes.RemoveAll(f => (now - f.T0).TotalMilliseconds > 700);
+        if (_bounceIndex < 0 && _flashes.Count == 0) { _animTimer.Stop(); return; }
+        RenderDock();
     }
 
     private void SetAutoHideTaskbar(bool on)
@@ -267,9 +416,22 @@ internal sealed class DockForm : Form
     protected override void OnMouseClick(MouseEventArgs e)
     {
         base.OnMouseClick(e);
+        if (e.Button == MouseButtons.Right)
+        {
+            int ridx = HitTest(e.Location);
+            DockApp? target = ridx >= 0 && ridx < _display.Count ? _display[ridx] : null;
+            BuildContextMenu(target).Show(Cursor.Position);
+            return;
+        }
         if (e.Button != MouseButtons.Left) return;
         int idx = HitTest(e.Location);
-        if (idx >= 0 && idx < _display.Count) _display[idx].LaunchOrFocus();
+        if (idx < 0 || idx >= _display.Count) return;
+        var app = _display[idx];
+        // v1.4 bounce on LAUNCH only, not on focus: bounce when the app was
+        // not running — plus Explorer, which always opens a new window.
+        bool wasRunning = app.IsRunning;
+        app.LaunchOrFocus();
+        if (!wasRunning || app.IsExplorer) StartBounce(idx);
     }
 
     private int HitTest(Point p)
@@ -304,8 +466,12 @@ internal sealed class DockForm : Form
     private void RefreshRunning()
     {
         var pinnedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pinnedAumids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var a in _pinned)
+        {
             if (!string.IsNullOrWhiteSpace(a.ProcessName)) pinnedNames.Add(a.ProcessName);
+            if (!string.IsNullOrWhiteSpace(a.AumidHint)) pinnedAumids.Add(a.AumidHint);
+        }
         int ownPid = Process.GetCurrentProcess().Id;
         var list = new List<DockApp>();
         var liveKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -330,6 +496,9 @@ internal sealed class DockForm : Form
                     catch { continue; }
                     if (pinnedNames.Contains(realName)) continue;
                     string aumid = family + "!App";
+                    // v1.4: a user-pinned Store app must not ALSO appear in
+                    // the running section (same AUMID, two icons).
+                    if (pinnedAumids.Contains(aumid)) continue;
                     var app = new DockApp
                     {
                         Name = IconHelper.FriendlyAppName(realName),
@@ -397,6 +566,27 @@ internal sealed class DockForm : Form
         _display.AddRange(_running);
         _display.Add(_launchpadApp);
         _display.Add(_trashApp);
+
+        // v1.4: a launch from Launchpad/Quick Search asked for a bounce —
+        // start it once the app shows up in the display list (4s cap,
+        // then the request is dropped).
+        if (_pendingBounce != null)
+        {
+            if ((DateTime.UtcNow - _pendingBounceSince).TotalSeconds > 4) _pendingBounce = null;
+            else
+            {
+                for (int i = 0; i < _display.Count; i++)
+                {
+                    string? pn = _display[i].ProcessName;
+                    if (pn != null && pn.Equals(_pendingBounce, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _pendingBounce = null;
+                        StartBounce(i);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     private static Bitmap LoadTrashIcon()
@@ -584,6 +774,16 @@ internal sealed class DockForm : Form
                 // outer drop shadow above stays.
                 using var highlight = new Pen(Color.FromArgb(71, 255, 255, 255), 1f);
                 g.DrawPath(highlight, bg);
+                // v1.4 Liquid Glass: specular gradient across the pill's
+                // top edge (paint-only; blur + tint above are unchanged).
+                var gs = g.Save();
+                g.SetClip(bg);
+                using (var gloss = new LinearGradientBrush(
+                    new Rectangle(pill.X, pill.Y, pill.Width, 14),
+                    Color.FromArgb(60, 255, 255, 255), Color.FromArgb(0, 255, 255, 255),
+                    LinearGradientMode.Vertical))
+                    g.FillRectangle(gloss, new Rectangle(pill.X, pill.Y, pill.Width, 14));
+                g.Restore(gs);
             }
 
             // Icons, running dots, separators. The WHOLE icon magnifies.
@@ -601,6 +801,18 @@ internal sealed class DockForm : Form
                 }
                 int s = sizes[i];
                 var rect = new Rectangle(x, iconBottom - s, s, s);
+                // v1.4 launch bounce: the icon scales IN PLACE (neighbours
+                // do not move — the x advance below still uses the
+                // un-bounced size, so magnification geometry is untouched).
+                if (i == _bounceIndex)
+                {
+                    double t = (DateTime.UtcNow - _bounceT0).TotalMilliseconds;
+                    double decay = Math.Max(0, 1 - t / 3000.0);
+                    double bounce = 1 + 0.30 * Math.Abs(Math.Sin(t / 250.0 * Math.PI)) * decay;
+                    int bs = Math.Max(1, (int)Math.Round(s * bounce));
+                    int cx = x + s / 2;
+                    rect = new Rectangle(cx - bs / 2, iconBottom - bs, bs, bs);
+                }
                 _iconRects.Add(rect);
                 DrawDockIcon(g, _display[i], rect);
                 x += s + Gap;
@@ -611,6 +823,19 @@ internal sealed class DockForm : Form
                     using var dot = new SolidBrush(Color.FromArgb(230, 255, 255, 255));
                     g.FillEllipse(dot, cx - 2, pill.Bottom - 6, 4, 4);
                 }
+            }
+
+            // v1.4 launch flash: expanding fading rings from the icon.
+            var flashNow = DateTime.UtcNow;
+            foreach (var f in _flashes)
+            {
+                double age = (flashNow - f.T0).TotalMilliseconds;
+                if (age > 700) continue;
+                double p = age / 700.0;
+                int radius = (int)Math.Round(12 + 48 * p);
+                int alpha = (int)Math.Round(160 * (1 - p));
+                using var pen = new Pen(Color.FromArgb(alpha, 255, 255, 255), 2f);
+                g.DrawEllipse(pen, f.Center.X - radius, f.Center.Y - radius, radius * 2, radius * 2);
             }
 
             using (var pen = new Pen(Color.FromArgb(50, 255, 255, 255), 1f))

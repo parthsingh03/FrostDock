@@ -53,7 +53,7 @@ internal sealed class TopBarForm : Form
     {
         var about = new ToolStripMenuItem("About FrostDock");
         about.Click += (_, _) => MessageBox.Show(
-            "FrostDock 1.3\n\nA macOS-style dock, top bar, Quick search, Launchpad and Control Center for Windows.\nOriginal code, not affiliated with Apple.",
+            "FrostDock 1.4\n\nA macOS-style dock, top bar, Quick search, Launchpad and Control Center for Windows.\nOriginal code, not affiliated with Apple.",
             "About FrostDock", MessageBoxButtons.OK, MessageBoxIcon.None);
         var exit = new ToolStripMenuItem("Exit FrostDock");
         exit.Click += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
@@ -343,5 +343,10 @@ internal sealed class TopBarForm : Form
             g.FillRectangle(pillFill, new Rectangle(gx, gy, 20, 6));
         using (var pillEdge = new Pen(Color.White, 1f))
             g.DrawRectangle(pillEdge, new Rectangle(gx, gy + 8, 20, 6));
+
+        // v1.4 Liquid Glass accent: specular hairline along the bar's
+        // bottom edge (paint-only; acrylic body and labels unchanged).
+        using (var hairline = new Pen(Color.FromArgb(40, 255, 255, 255), 1f))
+            g.DrawLine(hairline, 0, BarHeight - 1, Width, BarHeight - 1);
     }
 }

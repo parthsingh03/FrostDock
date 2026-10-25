@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -10,7 +10,7 @@
     <AssemblyName>FrostDock</AssemblyName>
     <RootNamespace>FrostDock</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <Authors>Parth Singh</Authors>
     <Description>FrostDock - a macOS-style dock, top bar, Quick search, Launchpad and Control Center for Windows. All original code, not affiliated with Apple.</Description>
   </PropertyGroup>

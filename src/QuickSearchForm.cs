@@ -21,6 +21,9 @@ internal sealed class QuickSearchForm : Form
 
     private sealed record SearchItem(string Name, string Path);
 
+    /// <summary>Fired when an app is launched, with a process-name hint for dock bounce.</summary>
+    public event EventHandler<string>? AppLaunched;
+
     public QuickSearchForm()
     {
         FormBorderStyle = FormBorderStyle.None;
@@ -183,8 +186,31 @@ internal sealed class QuickSearchForm : Form
         if (_filtered.Count == 0) return;
         var item = _filtered[i];
         Hide();
-        try { Process.Start(new ProcessStartInfo { FileName = item.Path, UseShellExecute = true }); }
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = item.Path, UseShellExecute = true });
+            // v1.4: bounce hint for the dock (resolved target's exe name).
+            try
+            {
+                string target = ShellIcons.ResolveLinkTarget(item.Path);
+                string hint = Path.GetFileNameWithoutExtension(
+                    string.IsNullOrWhiteSpace(target) ? item.Path : target);
+                if (!string.IsNullOrWhiteSpace(hint)) AppLaunched?.Invoke(this, hint);
+            }
+            catch { }
+        }
         catch { }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        // v1.4 Liquid Glass edge: specular top line + hairline rim around
+        // the box (paint-only; the acrylic body and controls are unchanged).
+        using var top = new Pen(Color.FromArgb(90, 255, 255, 255), 1f);
+        e.Graphics.DrawLine(top, 0, 0, Width, 0);
+        using var rim = new Pen(Color.FromArgb(60, 255, 255, 255), 1f);
+        e.Graphics.DrawRectangle(rim, 0, 0, Width - 1, Height - 1);
     }
 
     public void ShowSearch()
