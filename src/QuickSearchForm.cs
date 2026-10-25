@@ -6,13 +6,18 @@ namespace FrostDock;
 /// Quick-search-style search: a centred frosted panel with one search box.
 /// Searches Start Menu shortcuts; Enter launches the top match.
 /// Opened with Alt+Space / Ctrl+Space, closed with Esc.
+/// v1.2: macOS-style traffic lights top-left (red = close, yellow = hide,
+/// green = toggle normal/expanded size). The search box shifts right so
+/// the lights never overlap it.
 /// </summary>
 internal sealed class QuickSearchForm : Form
 {
     private readonly TextBox _search = new();
     private readonly ListBox _results = new();
+    private readonly Panel _line = new();
     private readonly List<SearchItem> _all = new();
     private List<SearchItem> _filtered = new();
+    private bool _expanded;
 
     private sealed record SearchItem(string Name, string Path);
 
@@ -30,32 +35,75 @@ internal sealed class QuickSearchForm : Form
         var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
         Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + 120);
 
+        // Traffic lights: red close, yellow hide, green size toggle.
+        AddLight(16, Color.FromArgb(255, 95, 87), "Close", (_, _) => Hide());
+        AddLight(32, Color.FromArgb(255, 189, 46), "Hide (app keeps running)", (_, _) => Hide());
+        AddLight(48, Color.FromArgb(255, 40, 205, 65), "Toggle size", (_, _) => ToggleSize());
+
         _search.BorderStyle = BorderStyle.None;
         _search.BackColor = Color.FromArgb(34, 34, 40);
         _search.ForeColor = Color.White;
         _search.Font = new Font("Segoe UI", 20f);
         _search.PlaceholderText = "Quick Search";
-        _search.SetBounds(24, 18, Width - 48, 44);
         _search.TextChanged += (_, _) => ApplyFilter();
         _search.KeyDown += Search_KeyDown;
         Controls.Add(_search);
 
-        var line = new Panel { BackColor = Color.FromArgb(80, 255, 255, 255), Height = 1 };
-        line.SetBounds(24, 72, Width - 48, 1);
-        Controls.Add(line);
+        _line.BackColor = Color.FromArgb(80, 255, 255, 255);
+        _line.Height = 1;
+        Controls.Add(_line);
 
         _results.BorderStyle = BorderStyle.None;
         _results.BackColor = Color.FromArgb(34, 34, 40);
         _results.ForeColor = Color.FromArgb(235, 235, 235);
         _results.Font = new Font("Segoe UI", 12f);
         _results.ItemHeight = 30;
-        _results.SetBounds(16, 84, Width - 32, Height - 100);
         _results.DoubleClick += (_, _) => LaunchSelected();
         _results.KeyDown += Search_KeyDown;
         Controls.Add(_results);
 
+        LayoutControls();
         LoadApps();
         ApplyFilter();
+    }
+
+    private void AddLight(int x, Color color, string tip, EventHandler onClick)
+    {
+        var light = new Panel { BackColor = Color.Transparent, Size = new Size(12, 12), Location = new Point(x, 20) };
+        light.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using var brush = new SolidBrush(color);
+            e.Graphics.FillEllipse(brush, 0, 0, 11, 11);
+        };
+        light.Click += onClick;
+        new ToolTip().SetToolTip(light, tip);
+        Controls.Add(light);
+    }
+
+    private void LayoutControls()
+    {
+        _search.SetBounds(72, 18, Width - 96, 44);
+        _line.SetBounds(24, 72, Width - 48, 1);
+        _results.SetBounds(16, 84, Width - 32, Height - 100);
+    }
+
+    private void ToggleSize()
+    {
+        _expanded = !_expanded;
+        var area = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
+        if (_expanded)
+        {
+            Width = Math.Min(900, area.Width - 80);
+            Height = Math.Min(600, area.Height - 120);
+        }
+        else
+        {
+            Width = 640;
+            Height = 420;
+        }
+        Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + 120);
+        LayoutControls();
     }
 
     protected override void OnLoad(EventArgs e)

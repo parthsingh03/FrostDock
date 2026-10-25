@@ -10,9 +10,13 @@
     <AssemblyName>FrostDock</AssemblyName>
     <RootNamespace>FrostDock</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Authors>Parth Singh</Authors>
-    <Description>FrostDock - a macOS-style dock, top bar and Quick search for Windows. All original code.</Description>
+    <Description>FrostDock - a macOS-style dock, top bar, Quick search, Launchpad and Control Center for Windows. All original code, not affiliated with Apple.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
 
 </Project>

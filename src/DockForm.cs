@@ -6,15 +6,17 @@ using System.Runtime.InteropServices;
 namespace FrostDock;
 
 /// <summary>
-/// FrostDock dock v1.1 (Argon plan): a WS_EX_LAYERED window rendered to an
-/// off-screen 32-bit alpha bitmap and pushed with UpdateLayeredWindow.
-/// The Form itself is a FIXED full-width, ~140px tall surface; only the
-/// bottom 64px pill is visible content, and magnified icons burst above it.
-/// The Form is never resized or moved per animation frame (that caused
-/// jitter in v1.0); all animation happens inside bitmap coordinates.
-/// Clicks pass through empty alpha pixels via WM_NCHITTEST = HTTRANSPARENT.
-/// v1.0 sins removed: Form.Region (1-bit aliased corners), TransparencyKey,
-/// per-frame Width changes, 32px upscaled icons, letter tiles.
+/// FrostDock dock v1.2: v1.1's layered-window dock (UpdateLayeredWindow,
+/// fixed full-width 140px form, no Region/TransparencyKey/per-frame resize,
+/// WM_NCHITTEST pass-through) plus:
+/// - WALLPAPER-SAMPLED frosted pill (v1.1's DWM blur region did not visibly
+///   frost on the user's screenshots — the pill read as a flat dark slab).
+/// - SQUIRCLE tiles: every icon renders as a uniform rounded-square app
+///   tile; the whole tile magnifies, never just the logo.
+/// - BOTTOM-FLUSH anchoring: Bounds (never WorkingArea), pill bottom 4px
+///   above the screen's bottom edge (v1.1 floated ~20px up: WorkingArea
+///   anchor + pillBottom = FormHeight - Shadow - 2).
+/// - Launchpad + Trash synthetic entries at the dock's right end.
 /// </summary>
 internal sealed class DockForm : Form
 {
@@ -27,10 +29,11 @@ internal sealed class DockForm : Form
     private const int PillRadius = 18;
     private const int Shadow = 12;
     private const int FormHeight = 140;
-    private const int BottomMargin = 6;
+    private const int BottomMargin = 4;
     private const int MaxRunning = 12;
     private const int HotkeyAltSpace = 1;
     private const int HotkeyCtrlSpace = 2;
+    private const int HotkeyLaunchpad = 3;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_NOACTIVATE = 0x08000000;
 
@@ -39,7 +42,11 @@ internal sealed class DockForm : Form
     private List<DockApp> _display = new();
     private readonly List<Rectangle> _iconRects = new();
     private readonly Dictionary<string, Bitmap> _iconCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<Bitmap, bool> _squareCache = new();
+    private readonly Dictionary<Bitmap, Bitmap> _tileCache = new();
+    private readonly List<int> _sepXs = new();
+    private DockApp _launchpadApp = null!;
+    private DockApp _trashApp = null!;
+    private bool? _trashFull;
     private readonly ToolTip _tip = new();
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 1500 };
     private Point _mouse = new(-9999, -9999);
@@ -49,17 +56,34 @@ internal sealed class DockForm : Form
     private int _originalTaskbarState;
     private bool _taskbarTouched;
     private Rectangle _pillRect = Rectangle.Empty;
-    private Rectangle _lastBlurRect = Rectangle.Empty;
-    private IntPtr _blurRegion = IntPtr.Zero;
 
     public event EventHandler? ShowSearchRequested;
     public event EventHandler? ToggleTopBarRequested;
     public event EventHandler? ExitRequested;
+    public event EventHandler? LaunchpadRequested;
 
     public DockForm(List<DockApp> apps)
     {
         _pinned = apps;
-        _display = new List<DockApp>(_pinned);
+        _launchpadApp = new DockApp
+        {
+            Name = "Launchpad",
+            LaunchTarget = string.Empty,
+            IconIsTile = true,
+            SpecialAction = () => LaunchpadRequested?.Invoke(this, EventArgs.Empty)
+        };
+        _launchpadApp.IconBitmap = SquircleTiles.LaunchpadIcon();
+        _trashApp = new DockApp
+        {
+            Name = "Trash",
+            LaunchTarget = "shell:RecycleBinFolder",
+            SpecialAction = () =>
+            {
+                try { Process.Start(new ProcessStartInfo { FileName = "shell:RecycleBinFolder", UseShellExecute = true }); } catch { }
+            }
+        };
+        _trashApp.IconBitmap = LoadTrashIcon();
+        _display = new List<DockApp>(_pinned) { _launchpadApp, _trashApp };
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
@@ -90,6 +114,9 @@ internal sealed class DockForm : Form
         var menu = new ContextMenuStrip();
         var quickSearch = new ToolStripMenuItem("Quick search (Alt+Space)");
         quickSearch.Click += (_, _) => ShowSearchRequested?.Invoke(this, EventArgs.Empty);
+        var launchpad = new ToolStripMenuItem("Launchpad (F4)");
+        launchpad.Click += (_, _) => LaunchpadRequested?.Invoke(this, EventArgs.Empty);
+        menu.Items.Add(launchpad);
         var topBar = new ToolStripMenuItem("Show / hide top bar");
         topBar.Click += (_, _) => ToggleTopBarRequested?.Invoke(this, EventArgs.Empty);
         var autoHide = new ToolStripMenuItem("Auto-hide Windows taskbar") { CheckOnClick = true };
@@ -115,6 +142,10 @@ internal sealed class DockForm : Form
             }
             _autoHideTaskbar = on;
             NativeMethods.SetTaskbarAutoHide(on);
+            // Bounds-anchored now, but re-anchor anyway so the dock never
+            // drifts after a taskbar state change.
+            Recenter();
+            RenderDock();
         }
         catch { }
     }
@@ -137,27 +168,32 @@ internal sealed class DockForm : Form
         RenderDock();
         try { NativeMethods.RegisterHotKey(Handle, HotkeyAltSpace, NativeMethods.MOD_ALT, NativeMethods.VK_SPACE); } catch { }
         try { NativeMethods.RegisterHotKey(Handle, HotkeyCtrlSpace, NativeMethods.MOD_CONTROL, NativeMethods.VK_SPACE); } catch { }
+        try { NativeMethods.RegisterHotKey(Handle, HotkeyLaunchpad, 0, NativeMethods.VK_F4); } catch { }
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         try { NativeMethods.UnregisterHotKey(Handle, HotkeyAltSpace); } catch { }
         try { NativeMethods.UnregisterHotKey(Handle, HotkeyCtrlSpace); } catch { }
-        if (_blurRegion != IntPtr.Zero)
-        {
-            try { NativeMethods.DeleteObject(_blurRegion); } catch { }
-            _blurRegion = IntPtr.Zero;
-        }
+        try { NativeMethods.UnregisterHotKey(Handle, HotkeyLaunchpad); } catch { }
         base.OnFormClosed(e);
     }
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == NativeMethods.WM_HOTKEY &&
-            (m.WParam.ToInt32() == HotkeyAltSpace || m.WParam.ToInt32() == HotkeyCtrlSpace))
+        if (m.Msg == NativeMethods.WM_HOTKEY)
         {
-            ShowSearchRequested?.Invoke(this, EventArgs.Empty);
-            return;
+            int id = m.WParam.ToInt32();
+            if (id == HotkeyAltSpace || id == HotkeyCtrlSpace)
+            {
+                ShowSearchRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+            if (id == HotkeyLaunchpad)
+            {
+                LaunchpadRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            }
         }
         if (m.Msg == NativeMethods.WM_NCHITTEST)
         {
@@ -179,8 +215,11 @@ internal sealed class DockForm : Form
             m.Result = (IntPtr)(hit ? NativeMethods.HTCLIENT : NativeMethods.HTTRANSPARENT);
             return;
         }
-        if (m.Msg == NativeMethods.WM_DISPLAYCHANGE)
+        if (m.Msg == NativeMethods.WM_DISPLAYCHANGE || m.Msg == NativeMethods.WM_SETTINGCHANGE)
         {
+            // Wallpaper, resolution or work-area change: re-anchor and
+            // rebuild the blurred wallpaper cache.
+            WallpaperBlur.Invalidate();
             Recenter();
             RenderDock();
             base.WndProc(ref m);
@@ -189,11 +228,17 @@ internal sealed class DockForm : Form
         base.WndProc(ref m);
     }
 
+    /// <summary>
+    /// v1.2 bottom-flush anchor: full screen Bounds, NEVER WorkingArea, so
+    /// the taskbar's state (shown / auto-hidden) can never push the dock up.
+    /// The pill itself ends BottomMargin (4px) above the screen's bottom
+    /// edge — a macOS-like hairline gap, visually AT the very bottom.
+    /// </summary>
     public void Recenter()
     {
-        var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+        var area = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
         Width = area.Width;
-        Location = new Point(area.Left, area.Bottom - FormHeight - BottomMargin);
+        Location = new Point(area.Left, area.Bottom - FormHeight);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -314,20 +359,75 @@ internal sealed class DockForm : Form
             }
         }
 
-        // Prune cached icons for apps that are no longer running.
+        // Prune cached icons (and their tiles) for apps that are no longer running.
         var dead = new List<string>();
         foreach (var key in _iconCache.Keys)
             if (!liveKeys.Contains(key)) dead.Add(key);
         foreach (var key in dead)
         {
-            try { _squareCache.Remove(_iconCache[key]); } catch { }
-            try { _iconCache[key].Dispose(); } catch { }
+            var oldIcon = _iconCache[key];
+            if (_tileCache.TryGetValue(oldIcon, out var oldTile))
+            {
+                try { oldTile.Dispose(); } catch { }
+                _tileCache.Remove(oldIcon);
+            }
+            try { oldIcon.Dispose(); } catch { }
             _iconCache.Remove(key);
         }
+
+        // Trash full/empty state (SHQueryRecycleBin): re-fetch the shell
+        // Trash icon only when the state flips, so the icon tracks reality.
+        try
+        {
+            if (NativeMethods.TryGetRecycleBinCount(out long items))
+            {
+                bool full = items > 0;
+                if (_trashFull != full)
+                {
+                    _trashFull = full;
+                    var oldTrash = _trashApp.IconBitmap;
+                    _trashApp.IconBitmap = LoadTrashIcon();
+                    if (oldTrash != null && _tileCache.TryGetValue(oldTrash, out var oldTrashTile))
+                    {
+                        try { oldTrashTile.Dispose(); } catch { }
+                        _tileCache.Remove(oldTrash);
+                    }
+                }
+            }
+        }
+        catch { }
 
         _running = list;
         _display = new List<DockApp>(_pinned);
         _display.AddRange(_running);
+        _display.Add(_launchpadApp);
+        _display.Add(_trashApp);
+    }
+
+    private static Bitmap LoadTrashIcon()
+    {
+        // The shell's own Recycle Bin icon (state-aware). Falls back to the
+        // neutral generic tile if the shell path cannot be resolved.
+        var bmp = ShellIcons.GetImageForParsingName("shell:RecycleBinFolder")
+            ?? ShellIcons.GetImageForParsingName("::{645FF040-5081-101B-9F08-00AA002F954E}");
+        return bmp ?? ShellIcons.GenericIcon();
+    }
+
+    /// <summary>
+    /// 96px tile for a source icon (cached per source bitmap). Tiles are
+    /// rendered once at 96px and scale-drawn to the on-screen size — max
+    /// magnification is 78px, so this is always a downscale (crisp).
+    /// Launchpad's icon is already finished tile artwork: used as-is.
+    /// </summary>
+    private Bitmap GetTile(DockApp app)
+    {
+        var icon = app.IconBitmap;
+        if (icon == null) return SquircleTiles.RenderTile(ShellIcons.GenericIcon());
+        if (app.IconIsTile) return icon;
+        if (_tileCache.TryGetValue(icon, out var tile)) return tile;
+        tile = SquircleTiles.RenderTile(icon, 96);
+        _tileCache[icon] = tile;
+        return tile;
     }
 
     private Bitmap GetCachedIcon(string key, Func<Bitmap> load)
@@ -336,14 +436,6 @@ internal sealed class DockForm : Form
         bmp = load();
         _iconCache[key] = bmp;
         return bmp;
-    }
-
-    private bool IsSquareTile(Bitmap bmp)
-    {
-        if (_squareCache.TryGetValue(bmp, out bool v)) return v;
-        v = ShellIcons.IsFullBleedSquare(bmp);
-        _squareCache[bmp] = v;
-        return v;
     }
 
     private static GraphicsPath RoundedRectPath(Rectangle rect, int radius)
@@ -367,8 +459,17 @@ internal sealed class DockForm : Form
         if (!IsHandleCreated || _display.Count == 0) return;
         int n = _display.Count;
         int pinnedCount = _pinned.Count;
-        bool hasRunning = _running.Count > 0;
-        int sepSpace = hasRunning ? Gap + 1 + Gap : 0;
+        int runningCount = _running.Count;
+        bool hasRunning = runningCount > 0;
+
+        // Separators: one between pinned and running (when any are running),
+        // one before the Launchpad/Trash group at the dock's right end.
+        var sepBefore = new bool[n];
+        if (hasRunning) sepBefore[pinnedCount] = true;
+        sepBefore[pinnedCount + runningCount] = true;
+        int sepCount = 0;
+        foreach (bool b in sepBefore) if (b) sepCount++;
+        int sepSpace = sepCount * (Gap + 1 + Gap);
 
         // Base (unmagnified) layout: centres for the magnification falloff.
         int baseWidth = PadX * 2 + n * BaseSize + (n - 1) * Gap + sepSpace;
@@ -378,21 +479,24 @@ internal sealed class DockForm : Form
             int x = basePillX + PadX;
             for (int i = 0; i < n; i++)
             {
+                if (sepBefore[i]) x += Gap + 1 + Gap;
                 baseCenters[i] = x + BaseSize / 2;
                 x += BaseSize + Gap;
-                if (hasRunning && i == pinnedCount - 1) x += Gap + 1 + Gap;
             }
         }
 
         var sizes = new int[n];
         for (int i = 0; i < n; i++) sizes[i] = IconSizeAt(i, baseCenters);
 
-        // Magnified pill geometry (bitmap coordinates only).
+        // Magnified pill geometry (bitmap coordinates only). The pill bottom
+        // sits BottomMargin (4px) above the form's bottom edge, and the form
+        // itself ends at the screen's bottom edge (Bounds anchor) — so the
+        // pill is visually AT the very bottom, never floating ~20px up.
         int magWidth = PadX * 2;
         for (int i = 0; i < n; i++) magWidth += sizes[i] + (i > 0 ? Gap : 0);
         magWidth += sepSpace;
         int pillX = (Width - magWidth) / 2;
-        int pillBottom = FormHeight - Shadow - 2;
+        int pillBottom = FormHeight - BottomMargin;
         int pillTop = pillBottom - PillHeight;
         var pill = new Rectangle(pillX, pillTop, magWidth, PillHeight);
         _pillRect = pill;
@@ -405,7 +509,9 @@ internal sealed class DockForm : Form
             g.PixelOffsetMode = PixelOffsetMode.Half;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-            // Soft drop shadow: stacked expanding rounded rects, low alpha each.
+            // Soft drop shadow: stacked expanding rounded rects, low alpha
+            // each. The bottom rows clip at the form's bottom edge (the dock
+            // sits at the screen edge, like macOS) — top/side shadow reads.
             for (int i = Shadow; i >= 1; i--)
             {
                 var r = new Rectangle(pill.X - i, pill.Y - i, pill.Width + i * 2, pill.Height + i * 2);
@@ -414,12 +520,34 @@ internal sealed class DockForm : Form
                 g.FillPath(brush, path);
             }
 
-            // Pill background: translucent tint over the DWM-blurred region
-            // (see UpdateBlurRegion). If DWM blur is unavailable, the tint's
-            // own translucency still shows the desktop through softly.
+            // Pill background: WALLPAPER-SAMPLED blur (v1.2) — a blurred copy
+            // of the wallpaper region behind the pill, so wallpaper colour
+            // visibly bleeds through. The tint is deliberately lighter than
+            // v1.1's 140-alpha slab so the bleed-through actually reads.
+            // If no wallpaper can be read, the tint alone is the fallback.
+            var blurred = WallpaperBlur.GetBlurredScreen();
+            if (blurred != null)
+            {
+                try
+                {
+                    var screen = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
+                    int sx = Location.X + pill.X;
+                    int sy = Location.Y + pill.Y;
+                    var src = new Rectangle(
+                        (int)Math.Round((double)(sx - screen.Left) * blurred.Width / screen.Width),
+                        (int)Math.Round((double)(sy - screen.Top) * blurred.Height / screen.Height),
+                        Math.Max(1, (int)Math.Round((double)pill.Width * blurred.Width / screen.Width)),
+                        Math.Max(1, (int)Math.Round((double)pill.Height * blurred.Height / screen.Height)));
+                    using var clip = RoundedRectPath(pill, PillRadius);
+                    g.SetClip(clip);
+                    g.DrawImage(blurred, pill, src, GraphicsUnit.Pixel);
+                    g.ResetClip();
+                }
+                catch { /* tint fallback below still paints the pill */ }
+            }
             using (var bg = RoundedRectPath(pill, PillRadius))
             {
-                using var fill = new SolidBrush(Color.FromArgb(140, 30, 30, 36));
+                using var fill = new SolidBrush(Color.FromArgb(80, 30, 30, 36));
                 g.FillPath(fill, bg);
                 using var outer = new Pen(Color.FromArgb(90, 0, 0, 0), 1f);
                 g.DrawPath(outer, bg);
@@ -432,37 +560,24 @@ internal sealed class DockForm : Form
                 g.DrawPath(inner, innerPath);
             }
 
-            // Icons, running dots, separator.
+            // Tiles, running dots, separators. The WHOLE tile magnifies.
             _iconRects.Clear();
+            _sepXs.Clear();
             int x = pill.X + PadX;
             int iconBottom = pill.Bottom - 8;
-            int sepX = -1;
             for (int i = 0; i < n; i++)
             {
-                if (hasRunning && i == pinnedCount)
+                if (sepBefore[i])
                 {
-                    sepX = x + Gap;
+                    int sepX = x + Gap;
+                    _sepXs.Add(sepX);
                     x = sepX + 1 + Gap;
                 }
                 int s = sizes[i];
                 var rect = new Rectangle(x, iconBottom - s, s, s);
                 _iconRects.Add(rect);
-                var icon = _display[i].IconBitmap;
-                if (icon != null)
-                {
-                    if (IsSquareTile(icon))
-                    {
-                        // Optical sizing: full-bleed squares draw smaller so
-                        // their visual weight matches circles/freeform icons.
-                        int ds = s * 42 / 48;
-                        var centered = new Rectangle(rect.X + (s - ds) / 2, rect.Y + (s - ds) / 2, ds, ds);
-                        g.DrawImage(icon, centered);
-                    }
-                    else
-                    {
-                        g.DrawImage(icon, rect);
-                    }
-                }
+                var tile = GetTile(_display[i]);
+                g.DrawImage(tile, rect);
                 x += s + Gap;
 
                 if (_display[i].IsRunning)
@@ -473,50 +588,15 @@ internal sealed class DockForm : Form
                 }
             }
 
-            if (sepX >= 0)
+            using (var pen = new Pen(Color.FromArgb(50, 255, 255, 255), 1f))
             {
-                using var pen = new Pen(Color.FromArgb(50, 255, 255, 255), 1f);
                 int y0 = pill.Top + (PillHeight - 36) / 2;
-                g.DrawLine(pen, sepX, y0, sepX, y0 + 36);
+                foreach (int sepX in _sepXs)
+                    g.DrawLine(pen, sepX, y0, sepX, y0 + 36);
             }
         }
 
-        UpdateBlurRegion(pill);
         PushLayeredBitmap(bmp);
-    }
-
-    /// <summary>
-    /// Primary blur path (Argon plan, step a): real DWM blur behind, clipped
-    /// to the pill region only, so a window behind the dock blurs correctly.
-    /// If DWM ignores layered windows, the pill tint's own translucency is
-    /// the graceful fallback (NOT an opaque slab like v1.0).
-    /// Wallpaper-sampled blur is deliberately not shipped: it cannot be
-    /// proven necessary from here, and it would show blurred wallpaper
-    /// instead of a blurred window whenever a window sits behind the dock.
-    /// </summary>
-    private void UpdateBlurRegion(Rectangle pill)
-    {
-        if (pill == _lastBlurRect) return;
-        try
-        {
-            var rgn = NativeMethods.CreateRoundRectRgn(pill.Left, pill.Top, pill.Right, pill.Bottom, PillRadius * 2, PillRadius * 2);
-            if (rgn == IntPtr.Zero) return;
-            var blur = new NativeMethods.DWM_BLURBEHIND
-            {
-                dwFlags = NativeMethods.DWM_BB_ENABLE | NativeMethods.DWM_BB_BLURREGION,
-                fEnable = true,
-                hRgnBlur = rgn,
-                fTransitionOnMaximized = false
-            };
-            NativeMethods.DwmEnableBlurBehindWindow(Handle, ref blur);
-            if (_blurRegion != IntPtr.Zero)
-            {
-                try { NativeMethods.DeleteObject(_blurRegion); } catch { }
-            }
-            _blurRegion = rgn;
-            _lastBlurRect = pill;
-        }
-        catch { /* blur is cosmetic - the translucent tint still works */ }
     }
 
     /// <summary>

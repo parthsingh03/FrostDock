@@ -8,6 +8,8 @@ internal static class NativeMethods
     public const int WM_HOTKEY = 0x0312;
     public const int WM_NCHITTEST = 0x0084;
     public const int WM_DISPLAYCHANGE = 0x007E;
+    public const int WM_SETTINGCHANGE = 0x001A;
+    public const int VK_F4 = 0x73;
     public const int HTTRANSPARENT = -1;
     public const int HTCLIENT = 1;
     public const int MOD_ALT = 0x0001;
@@ -282,6 +284,74 @@ internal static class NativeMethods
     [DllImport("gdi32.dll", SetLastError = true)]
     public static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint uStartScan, uint cScanLines,
         IntPtr lpvBits, ref BITMAPINFO lpbmi, uint uUsage);
+
+    // ---- Wallpaper path (SystemParametersInfo) ----
+    public const uint SPI_GETDESKWALLPAPER = 0x0073;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, StringBuilder pvParam, uint fWinIni);
+
+    // ---- Recycle Bin state (SHQueryRecycleBin) ----
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SHQUERYRBINFO
+    {
+        public uint cbSize;
+        public long i64Size;
+        public long i64NumItems;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int SHQueryRecycleBin(string pszRootPath, ref SHQUERYRBINFO pSHQueryRBInfo);
+
+    public static bool TryGetRecycleBinCount(out long items)
+    {
+        items = 0;
+        try
+        {
+            var info = new SHQUERYRBINFO { cbSize = (uint)Marshal.SizeOf<SHQUERYRBINFO>() };
+            int hr = SHQueryRecycleBin(string.Empty, ref info);
+            if (hr != 0) return false;
+            items = info.i64NumItems;
+            return true;
+        }
+        catch { return false; }
+    }
+
+    // ---- Bluetooth radio presence (bthprops.cpl) ----
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BLUETOOTH_FIND_RADIO_PARAMS
+    {
+        public uint dwSize;
+    }
+
+    [DllImport("bthprops.cpl", SetLastError = true)]
+    public static extern IntPtr BluetoothFindFirstRadio(ref BLUETOOTH_FIND_RADIO_PARAMS pbtfrp, out IntPtr phRadio);
+
+    [DllImport("bthprops.cpl", SetLastError = true)]
+    public static extern bool BluetoothFindRadioClose(IntPtr hFind);
+
+    [DllImport("bthprops.cpl", SetLastError = true)]
+    public static extern bool BluetoothCloseHandle(IntPtr hRadio);
+
+    public static bool BluetoothAdapterPresent()
+    {
+        try
+        {
+            var p = new BLUETOOTH_FIND_RADIO_PARAMS { dwSize = (uint)Marshal.SizeOf<BLUETOOTH_FIND_RADIO_PARAMS>() };
+            IntPtr hFind = BluetoothFindFirstRadio(ref p, out IntPtr hRadio);
+            if (hFind != IntPtr.Zero)
+            {
+                try { BluetoothFindRadioClose(hFind); } catch { }
+            }
+            if (hRadio != IntPtr.Zero)
+            {
+                try { BluetoothCloseHandle(hRadio); } catch { }
+                return true;
+            }
+            return false;
+        }
+        catch { return false; }
+    }
 
     // ---- .lnk resolution (IShellLinkW + IPersistFile) ----
     [DllImport("ole32.dll", SetLastError = true)]

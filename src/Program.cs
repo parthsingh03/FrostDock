@@ -14,6 +14,15 @@ internal static class Program
         var dock = new DockForm(apps);
         var topBar = new TopBarForm();
         var quickSearch = new QuickSearchForm();
+        var controlCenter = new ControlCenterForm();
+        var launchpad = new LaunchpadForm();
+
+        void ExitAll()
+        {
+            dock.RestoreTaskbar();
+            topBar.UnregisterAppBar();
+            Application.Exit();
+        }
 
         dock.ShowSearchRequested += (_, _) =>
         {
@@ -27,18 +36,20 @@ internal static class Program
             if (topBar.Visible) topBar.HideBar();
             else topBar.ShowBar();
         };
-        dock.ExitRequested += (_, _) =>
+        dock.ExitRequested += (_, _) => ExitAll();
+        topBar.ExitRequested += (_, _) => ExitAll();
+        dock.LaunchpadRequested += (_, _) =>
         {
-            dock.RestoreTaskbar();
-            topBar.UnregisterAppBar();
-            Application.Exit();
+            if (launchpad.Visible) launchpad.Hide();
+            else launchpad.ShowLaunchpad();
         };
+        topBar.ControlCenterRequested += (_, _) => controlCenter.TogglePanel();
         // Backstop for any other exit path: unregistering is idempotent.
         Application.ApplicationExit += (_, _) => topBar.UnregisterAppBar();
 
         dock.Show();
         topBar.Show();
-        // Quick search stays hidden until the hotkey is pressed.
+        // Quick search, Control Center and Launchpad stay hidden until invoked.
 
         Application.Run();
     }

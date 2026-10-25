@@ -6,7 +6,7 @@ using System.Text;
 namespace FrostDock;
 
 /// <summary>
-/// FrostDock top bar v1.1 (Argon plan):
+/// FrostDock top bar v1.2 (v1.1 AppBar behaviour preserved):
 /// - Registered as a real Windows AppBar (SHAppBarMessage, top edge, 30px),
 ///   so desktop icons and maximized windows move down instead of sliding
 ///   underneath it. ABM_REMOVE runs on every exit path; a stale reservation
@@ -15,10 +15,14 @@ namespace FrostDock;
 ///   region equals 100% of this window's rectangle).
 /// - Fully custom-painted (ClearType): wordmark + active app + static menu
 ///   labels on the left; Segoe Fluent Icons status glyphs + battery % +
-///   clock on the right, with real right padding.
+///   clock + a Control Center glyph on the right, with real right padding.
 /// - Active-app rule: when the foreground app is FrostDock itself, or the
 ///   desktop, show "Desktop" (fixes the v1.0 "FrostDock FrostDock" bug).
-/// Menu labels are labels only in v1.1 (non-functional by design).
+/// - v1.2 additions: clicking the ◆ FrostDock wordmark opens a small menu
+///   (About FrostDock, Exit FrostDock — both functional); clicking the
+///   status cluster or the Control Center glyph raises
+///   ControlCenterRequested. The other menu labels (File/Edit/View/Go/
+///   Window/Help) stay labels-only, as in v1.1.
 /// </summary>
 internal sealed class TopBarForm : Form
 {
@@ -28,14 +32,30 @@ internal sealed class TopBarForm : Form
 
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
     private readonly IntPtr _callbackMsg;
+    private readonly ContextMenuStrip _wordmarkMenu = new();
     private bool _appBarRegistered;
     private string _appName = "Desktop";
     private string _clockText = string.Empty;
     private int _batteryPct = -1; // -1 = no battery
     private bool _charging;
+    private Rectangle _wordmarkRect = Rectangle.Empty;
+    private Rectangle _statusRect = Rectangle.Empty;
+    private Rectangle _ccRect = Rectangle.Empty;
+
+    public event EventHandler? ControlCenterRequested;
+    public event EventHandler? ExitRequested;
 
     public TopBarForm()
     {
+        var about = new ToolStripMenuItem("About FrostDock");
+        about.Click += (_, _) => MessageBox.Show(
+            "FrostDock 1.2\n\nA macOS-style dock, top bar, Quick search, Launchpad and Control Center for Windows.\nOriginal code, not affiliated with Apple.",
+            "About FrostDock", MessageBoxButtons.OK, MessageBoxIcon.None);
+        var exit = new ToolStripMenuItem("Exit FrostDock");
+        exit.Click += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
+        _wordmarkMenu.Items.Add(about);
+        _wordmarkMenu.Items.Add(new ToolStripSeparator());
+        _wordmarkMenu.Items.Add(exit);
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
@@ -89,6 +109,19 @@ internal sealed class TopBarForm : Form
             return;
         }
         base.WndProc(ref m);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        base.OnMouseClick(e);
+        if (e.Button != MouseButtons.Left) return;
+        if (_wordmarkRect.Contains(e.Location))
+        {
+            _wordmarkMenu.Show(this, e.Location);
+            return;
+        }
+        if (_statusRect.Contains(e.Location) || _ccRect.Contains(e.Location))
+            ControlCenterRequested?.Invoke(this, EventArgs.Empty);
     }
 
     public void RegisterAppBar()
@@ -236,8 +269,10 @@ internal sealed class TopBarForm : Form
         // Left cluster: wordmark + active app + static menu labels.
         int x = 12;
         int y = 7;
+        int wordmarkW = TextRenderer.MeasureText(g, "◆ FrostDock", brandFont).Width;
         TextRenderer.DrawText(g, "◆ FrostDock", brandFont, new Point(x, y), Color.White);
-        x += TextRenderer.MeasureText(g, "◆ FrostDock", brandFont).Width + 16;
+        _wordmarkRect = new Rectangle(x, 0, wordmarkW, BarHeight);
+        x += wordmarkW + 16;
         TextRenderer.DrawText(g, _appName, textFont, new Point(x, y), Color.FromArgb(220, 220, 220));
         x += TextRenderer.MeasureText(g, _appName, textFont).Width + 24;
         foreach (string item in new[] { "File", "Edit", "View", "Go", "Window", "Help" })
@@ -247,13 +282,17 @@ internal sealed class TopBarForm : Form
         }
 
         // Right cluster, right-aligned with 16px padding (never crammed to the bezel).
+        // Order: Wi-Fi, volume, battery, clock, then the Control Center glyph
+        // at the bar's right end (macOS puts Control Center at the far right).
+        const int ccW = 24;
         int clockW = TextRenderer.MeasureText(g, _clockText, textFont).Width;
         int battTextW = _batteryPct >= 0 ? TextRenderer.MeasureText(g, _batteryPct + "%", textFont).Width : 0;
         int battW = _batteryPct >= 0 ? 26 + 4 + battTextW : 0;
         int wifiW = TextRenderer.MeasureText(g, "\uE701", glyphFont).Width;
         int volW = TextRenderer.MeasureText(g, "\uE767", glyphFont).Width;
-        int total = wifiW + 10 + volW + (_batteryPct >= 0 ? 14 + battW : 0) + 14 + clockW;
+        int total = wifiW + 10 + volW + (_batteryPct >= 0 ? 14 + battW : 0) + 14 + clockW + 14 + ccW;
         int rx = Width - 16 - total;
+        _statusRect = new Rectangle(rx, 0, total - 14 - ccW, BarHeight);
 
         TextRenderer.DrawText(g, "\uE701", glyphFont, new Point(rx, 6), Color.White);
         rx += wifiW + 10;
@@ -279,5 +318,15 @@ internal sealed class TopBarForm : Form
         }
 
         TextRenderer.DrawText(g, _clockText, textFont, new Point(rx, y), Color.White);
+        rx += clockW + 14;
+
+        // Control Center glyph: two stacked pill toggles (drawn, not a font
+        // glyph, so it renders identically on every machine).
+        _ccRect = new Rectangle(rx, 0, ccW, BarHeight);
+        int gx = rx + 2, gy = 8;
+        using (var pillFill = new SolidBrush(Color.White))
+            g.FillRectangle(pillFill, new Rectangle(gx, gy, 20, 6));
+        using (var pillEdge = new Pen(Color.White, 1f))
+            g.DrawRectangle(pillEdge, new Rectangle(gx, gy + 8, 20, 6));
     }
 }

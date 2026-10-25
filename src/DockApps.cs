@@ -17,6 +17,13 @@ internal sealed class DockApp
     /// <summary>Store/UWP AUMID (e.g. "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"), when known.</summary>
     public string? AumidHint { get; init; }
     public Bitmap? IconBitmap { get; set; }
+    /// <summary>
+    /// v1.2: synthetic dock entries (Launchpad, Trash) that run an action
+    /// instead of launching an app. When set, LaunchOrFocus runs it.
+    /// </summary>
+    public Action? SpecialAction { get; init; }
+    /// <summary>v1.2: true when IconBitmap is already finished tile artwork (Launchpad icon).</summary>
+    public bool IconIsTile { get; init; }
 
     public Process? RunningProcess
     {
@@ -38,6 +45,11 @@ internal sealed class DockApp
 
     public void LaunchOrFocus()
     {
+        if (SpecialAction != null)
+        {
+            try { SpecialAction(); } catch { }
+            return;
+        }
         try
         {
             var running = RunningProcess;
