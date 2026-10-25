@@ -6,11 +6,15 @@ using System.Text;
 namespace FrostDock;
 
 /// <summary>
-/// FrostDock top bar v1.2 (v1.1 AppBar behaviour preserved):
-/// - Registered as a real Windows AppBar (SHAppBarMessage, top edge, 30px),
+/// FrostDock top bar v1.3 (v1.1/v1.2 AppBar behaviour, hardened):
+/// - Registered as a real Windows AppBar (SHAppBarMessage, top edge, 28px),
 ///   so desktop icons and maximized windows move down instead of sliding
 ///   underneath it. ABM_REMOVE runs on every exit path; a stale reservation
-///   after a hard crash can only be cleared by an Explorer restart (noted).
+///   after a hard crash can only be cleared by an Explorer restart (the
+///   known v1.1 caveat — nothing here reintroduces it: registration is
+///   fully try/catch-guarded and a failed ABM_NEW no longer claims success).
+/// - v1.3: ABM_NEW's return value is checked (v1.2 set "registered" even
+///   on failure), and display changes re-run the workarea positioning.
 /// - Acrylic blur via SetWindowCompositionAttribute (safe here: the blurred
 ///   region equals 100% of this window's rectangle).
 /// - Fully custom-painted (ClearType): wordmark + active app + static menu
@@ -26,7 +30,7 @@ namespace FrostDock;
 /// </summary>
 internal sealed class TopBarForm : Form
 {
-    private const int BarHeight = 30;
+    private const int BarHeight = 28;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_NOACTIVATE = 0x08000000;
 
@@ -49,7 +53,7 @@ internal sealed class TopBarForm : Form
     {
         var about = new ToolStripMenuItem("About FrostDock");
         about.Click += (_, _) => MessageBox.Show(
-            "FrostDock 1.2\n\nA macOS-style dock, top bar, Quick search, Launchpad and Control Center for Windows.\nOriginal code, not affiliated with Apple.",
+            "FrostDock 1.3\n\nA macOS-style dock, top bar, Quick search, Launchpad and Control Center for Windows.\nOriginal code, not affiliated with Apple.",
             "About FrostDock", MessageBoxButtons.OK, MessageBoxIcon.None);
         var exit = new ToolStripMenuItem("Exit FrostDock");
         exit.Click += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
@@ -108,6 +112,15 @@ internal sealed class TopBarForm : Form
             RepositionAppBar();
             return;
         }
+        if (m.Msg == NativeMethods.WM_DISPLAYCHANGE)
+        {
+            // Resolution / monitor change: re-reserve the workarea at the
+            // new geometry instead of sitting at a stale position.
+            var area = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
+            Width = area.Width;
+            Location = new Point(area.Left, area.Top);
+            RepositionAppBar();
+        }
         base.WndProc(ref m);
     }
 
@@ -136,9 +149,11 @@ internal sealed class TopBarForm : Form
                 uCallbackMessage = (uint)_callbackMsg.ToInt32(),
                 uEdge = NativeMethods.ABE_TOP
             };
-            NativeMethods.SHAppBarMessage(NativeMethods.ABM_NEW, ref data);
-            _appBarRegistered = true;
-            RepositionAppBar();
+            // v1.3: honour ABM_NEW's result — v1.2 claimed registration
+            // even when the call failed, leaving the bar overlapping.
+            UIntPtr result = NativeMethods.SHAppBarMessage(NativeMethods.ABM_NEW, ref data);
+            _appBarRegistered = result != UIntPtr.Zero;
+            if (_appBarRegistered) RepositionAppBar();
         }
         catch { _appBarRegistered = false; }
     }

@@ -62,9 +62,22 @@ internal static class AudioVolume
         CoCreateInstance(ref clsid, IntPtr.Zero, CLSCTX_ALL, ref iid, out IMMDeviceEnumerator enumerator);
         try
         {
-            // eRender = 0, eConsole = 0.
-            int hr = enumerator.GetDefaultAudioEndpoint(0, 0, out IMMDevice device);
-            if (hr != 0 || device == null) return null;
+            // 1) The default render endpoint (eRender = 0, eConsole = 0).
+            // 2) v1.3 FALLBACK: on Parth's machine the default query fails
+            //    (Control Center showed "n/a") even though audio devices
+            //    exist — e.g. a dead/disabled device sitting as "default".
+            //    So enumerate ACTIVE render endpoints and take the first
+            //    one that activates. Only if nothing activates do callers
+            //    show n/a + a disabled row (honesty rule: never fake it).
+            IMMDevice? device = null;
+            int hr = enumerator.GetDefaultAudioEndpoint(0, 0, out IMMDevice def);
+            if (hr == 0 && def != null) device = def;
+            if (device == null)
+            {
+                device = FirstActiveRenderEndpoint(enumerator);
+                if (def != null) { try { Marshal.ReleaseComObject(def); } catch { } }
+            }
+            if (device == null) return null;
             try
             {
                 var audioIid = IID_AudioEndpointVolume;
@@ -82,6 +95,34 @@ internal static class AudioVolume
         }
     }
 
+    /// <summary>First DEVICE_STATE_ACTIVE (1) render endpoint, or null.</summary>
+    private static IMMDevice? FirstActiveRenderEndpoint(IMMDeviceEnumerator enumerator)
+    {
+        IntPtr collPtr = IntPtr.Zero;
+        IMMDeviceCollection? coll = null;
+        try
+        {
+            int hr = enumerator.EnumAudioEndpoints(0, 1, out collPtr);
+            if (hr != 0 || collPtr == IntPtr.Zero) return null;
+            coll = (IMMDeviceCollection)Marshal.GetObjectForIUnknown(collPtr);
+            hr = coll.GetCount(out uint count);
+            if (hr != 0) return null;
+            for (uint i = 0; i < count; i++)
+            {
+                hr = coll.GetDevice(i, out IMMDevice dev);
+                if (hr != 0 || dev == null) continue;
+                return dev; // caller releases
+            }
+            return null;
+        }
+        catch { return null; }
+        finally
+        {
+            if (coll != null) { try { Marshal.ReleaseComObject(coll); } catch { } }
+            if (collPtr != IntPtr.Zero) { try { Marshal.Release(collPtr); } catch { } }
+        }
+    }
+
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDeviceEnumerator
     {
@@ -93,6 +134,13 @@ internal static class AudioVolume
     private interface IMMDevice
     {
         [PreserveSig] int Activate(ref Guid iid, uint dwClsCtx, IntPtr pActivationParams, out IAudioEndpointVolume ppInterface);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A15-4A2D-9DB0-3C5E3F6B2A0F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDeviceCollection
+    {
+        [PreserveSig] int GetCount(out uint pcDevices);
+        [PreserveSig] int GetDevice(uint nDevice, out IMMDevice ppDevice);
     }
 
     [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

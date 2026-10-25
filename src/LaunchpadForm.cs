@@ -1,35 +1,47 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Text.RegularExpressions;
 
 namespace FrostDock;
 
 /// <summary>
-/// v1.2 Launchpad: a full-screen frosted overlay (blurred wallpaper + dark
-/// tint) showing a grid of Start Menu apps as squircle tiles with white
-/// name labels below (macOS style). A search field at the top filters the
-/// grid as you type. Click an app to launch it and close; Esc or a click on
-/// empty space closes without launching. Paged with arrow keys / wheel /
-/// dots when the grid overflows one screen.
-/// Icons come from the same discovery path as Quick Search (Start Menu
-/// .lnk files) resolved through ShellIcons (IShellItemImageFactory 256px)
-/// and rendered with the shared SquircleTiles renderer, so Launchpad tiles
-/// match the dock tiles exactly. Icons load on first open and are cached
+/// v1.3 Launchpad: a full-screen frosted overlay (blurred wallpaper + dark
+/// tint) showing Start Menu apps as macOS-style icons with white name
+/// labels below. No dark-grey tile plates: full-bleed square artwork is
+/// squircle-clipped, freeform artwork draws directly with a drop shadow —
+/// the same rule as the dock.
+/// - GRID: fixed 7 columns x 5 rows (35 per page), 72px icons, ~110px
+///   label width so names stop truncating at 10 characters. Pages via
+///   mouse wheel / arrow keys / dots at the bottom.
+/// - JUNK FILTER: shortcuts matching Uninstall*, dfrgui, iscsicpl,
+///   odbcad32 are dropped, and entries are deduplicated by NORMALIZED
+///   display name (parentheticals + version numbers stripped), so there
+///   are no 4x PowerShell / 3x Python repeats.
+/// - SEARCH: a custom-painted centered rounded pill (16px radius) with a
+///   magnifying-glass glyph + "Search" placeholder — not a WinForms
+///   TextBox. Typing anywhere filters; Enter launches the first match.
+/// Click an app to launch it and close; Esc or a click on empty space
+/// closes without launching. Icons load on first open and are cached
 /// for the session (first open can take a few seconds on large menus).
 /// Opened from the dock's Launchpad icon, the dock menu, or F4.
 /// </summary>
 internal sealed class LaunchpadForm : Form
 {
+    private const int Cols = 7;
+    private const int Rows = 5;
     private const int TileSize = 72;
-    private const int CellW = 116;
-    private const int CellH = 108;
+    private const int CellW = 132; // ~110px label width + padding
+    private const int CellH = 116;
     private const int GridTop = 140;
-    private const int GridBottomPad = 60;
+    private const int PerPage = Cols * Rows;
 
-    private readonly TextBox _search = new();
+    private string _query = string.Empty;
     private readonly List<LaunchItem> _all = new();
     private List<LaunchItem> _filtered = new();
-    private readonly Dictionary<string, Bitmap> _tileCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Bitmap> _iconCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Rectangle> _cellRects = new();
+    private Rectangle _searchPill = Rectangle.Empty;
     private bool _loaded;
     private int _page;
     private int _pageCount = 1;
@@ -48,47 +60,67 @@ internal sealed class LaunchpadForm : Form
         var area = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
         Bounds = area;
 
-        _search.BorderStyle = BorderStyle.FixedSingle;
-        _search.BackColor = Color.FromArgb(40, 40, 46);
-        _search.ForeColor = Color.White;
-        _search.Font = new Font("Segoe UI", 14f);
-        _search.PlaceholderText = "Search";
-        _search.SetBounds((Width - 400) / 2, 64, 400, 36);
-        _search.TextChanged += (_, _) => { _page = 0; ApplyFilter(); Invalidate(); };
-        _search.KeyDown += Search_KeyDown;
-        Controls.Add(_search);
-
         KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Escape) { Hide(); e.Handled = true; }
-            // Arrow paging must not hijack caret movement while typing.
-            else if (e.KeyCode == Keys.Right && !_search.Focused) { ChangePage(1); e.Handled = true; }
-            else if (e.KeyCode == Keys.Left && !_search.Focused) { ChangePage(-1); e.Handled = true; }
+            else if (e.KeyCode == Keys.Enter)
+            {
+                if (_filtered.Count > 0) Launch(_filtered[0]);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.Right) { ChangePage(1); e.Handled = true; }
+            else if (e.KeyCode == Keys.Left) { ChangePage(-1); e.Handled = true; }
+            else if (e.KeyCode == Keys.Back && _query.Length > 0)
+            {
+                _query = _query[..^1];
+                _page = 0; ApplyFilter(); Invalidate();
+                e.Handled = true;
+            }
+        };
+        KeyPress += (_, e) =>
+        {
+            if (!char.IsControl(e.KeyChar))
+            {
+                _query += e.KeyChar;
+                _page = 0; ApplyFilter(); Invalidate();
+                e.Handled = true;
+            }
         };
         MouseWheel += (_, e) => ChangePage(e.Delta < 0 ? 1 : -1);
-    }
-
-    private void Search_KeyDown(object? sender, KeyEventArgs e)
-    {
-        if (e.KeyCode == Keys.Escape) { Hide(); e.Handled = true; }
-        else if (e.KeyCode == Keys.Enter)
-        {
-            if (_filtered.Count > 0) Launch(_filtered[0]);
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-        }
     }
 
     public void ShowLaunchpad()
     {
         if (!_loaded) { LoadApps(); _loaded = true; }
-        _search.Text = string.Empty;
+        _query = string.Empty;
         _page = 0;
         ApplyFilter();
         Show();
         Activate();
-        _search.Focus();
         Invalidate();
+    }
+
+    /// <summary>True for shortcuts that are system junk, not launchable apps.</summary>
+    private static bool IsJunk(string name)
+    {
+        string n = name.ToLowerInvariant();
+        return n.StartsWith("uninstall") ||
+               n.Contains("dfrgui") || n.Contains("iscsicpl") || n.Contains("odbcad32");
+    }
+
+    /// <summary>
+    /// Normalize for dedupe: strip parentheticals ("(x86)"), version
+    /// numbers ("3.14"), collapse whitespace, lowercase — so "Windows
+    /// PowerShell", "Windows PowerShell (x86)" and "Windows PowerShell
+    /// ISE" no longer all appear as separate entries.
+    /// </summary>
+    private static string NormalizeName(string name)
+    {
+        string n = Regex.Replace(name, @"\(.*?\)", string.Empty);
+        n = Regex.Replace(n, @"\d+(\.\d+)*", string.Empty);
+        n = Regex.Replace(n, @"\s+", " ").Trim().ToLowerInvariant();
+        return n;
     }
 
     private void LoadApps()
@@ -107,7 +139,8 @@ internal sealed class LaunchpadForm : Form
                 foreach (var file in Directory.EnumerateFiles(root, "*.lnk", SearchOption.AllDirectories))
                 {
                     string name = Path.GetFileNameWithoutExtension(file);
-                    if (seen.Add(name)) _all.Add(new LaunchItem(name, file));
+                    if (IsJunk(name)) continue;
+                    if (seen.Add(NormalizeName(name))) _all.Add(new LaunchItem(name, file));
                 }
             }
             catch { }
@@ -117,20 +150,12 @@ internal sealed class LaunchpadForm : Form
 
     private void ApplyFilter()
     {
-        string q = _search.Text.Trim();
+        string q = _query.Trim();
         _filtered = q.Length == 0
             ? _all.ToList()
             : _all.Where(a => a.Name.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
-        int perPage = PerPage();
-        _pageCount = Math.Max(1, (int)Math.Ceiling((double)_filtered.Count / perPage));
+        _pageCount = Math.Max(1, (int)Math.Ceiling((double)_filtered.Count / PerPage));
         _page = Math.Clamp(_page, 0, _pageCount - 1);
-    }
-
-    private int PerPage()
-    {
-        int cols = Math.Max(1, (Width - 160) / CellW);
-        int rows = Math.Max(1, (Height - GridTop - GridBottomPad) / CellH);
-        return cols * rows;
     }
 
     private void ChangePage(int delta)
@@ -139,22 +164,20 @@ internal sealed class LaunchpadForm : Form
         if (next != _page) { _page = next; Invalidate(); }
     }
 
-    private Bitmap GetTile(LaunchItem item)
+    private Bitmap GetIcon(LaunchItem item)
     {
-        if (_tileCache.TryGetValue(item.Path, out var tile)) return tile;
-        Bitmap? icon = null;
+        if (_iconCache.TryGetValue(item.Path, out var icon)) return icon;
+        Bitmap? bmp = null;
         try
         {
             string target = ShellIcons.ResolveLinkTarget(item.Path);
             if (!string.IsNullOrWhiteSpace(target))
-                icon = ShellIcons.GetImageForParsingName(target);
+                bmp = ShellIcons.GetImageForParsingName(target);
         }
         catch { }
-        icon ??= ShellIcons.GenericIcon();
-        tile = SquircleTiles.RenderTile(icon, 96);
-        try { icon.Dispose(); } catch { } // tile is its own bitmap
-        _tileCache[item.Path] = tile;
-        return tile;
+        bmp ??= ShellIcons.GenericIcon();
+        _iconCache[item.Path] = bmp;
+        return bmp;
     }
 
     private void Launch(LaunchItem item)
@@ -167,13 +190,11 @@ internal sealed class LaunchpadForm : Form
     {
         base.OnMouseClick(e);
         // Clicks on cells launch; clicks anywhere else close Launchpad.
-        // (Clicks on the search box go to the TextBox control, not here.)
         for (int i = 0; i < _cellRects.Count; i++)
         {
             if (_cellRects[i].Contains(e.Location))
             {
-                int perPage = PerPage();
-                int idx = _page * perPage + i;
+                int idx = _page * PerPage + i;
                 if (idx < _filtered.Count) Launch(_filtered[idx]);
                 return;
             }
@@ -181,12 +202,57 @@ internal sealed class LaunchpadForm : Form
         Hide();
     }
 
+    private static GraphicsPath RoundedRectPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        int d = radius * 2;
+        path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    /// <summary>Same icon rule as the dock: no tile plates.</summary>
+    private static void DrawIcon(Graphics g, Bitmap icon, Rectangle rect)
+    {
+        if (ShellIcons.IsFullBleedSquare(icon))
+        {
+            int radius = Math.Max(1, rect.Width * 22 / 100);
+            using var clip = RoundedRectPath(rect, radius);
+            var state = g.Save();
+            try
+            {
+                g.SetClip(clip);
+                g.DrawImage(icon, rect);
+            }
+            finally { g.Restore(state); }
+            return;
+        }
+        var shadowRect = new Rectangle(rect.X, rect.Y + 2, rect.Width, rect.Height);
+        using (var attrs = new ImageAttributes())
+        {
+            var matrix = new ColorMatrix(new float[][]
+            {
+                new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 80f / 255f, 0 },
+                new float[] { 0, 0, 0, 0, 1 },
+            });
+            attrs.SetColorMatrix(matrix);
+            g.DrawImage(icon, shadowRect, 0, 0, icon.Width, icon.Height, GraphicsUnit.Pixel, attrs);
+        }
+        g.DrawImage(icon, rect);
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
         // Frosted background: blurred wallpaper stretched full-screen + tint.
@@ -198,30 +264,47 @@ internal sealed class LaunchpadForm : Form
         using (var tint = new SolidBrush(Color.FromArgb(110, 10, 10, 16)))
             g.FillRectangle(tint, new Rectangle(0, 0, Width, Height));
 
-        // Grid.
+        // Search pill: centered, 16px radius, magnifying-glass glyph +
+        // "Search" placeholder (or the live query). Not a TextBox.
+        _searchPill = new Rectangle((Width - 320) / 2, 64, 320, 36);
+        using (var path = RoundedRectPath(_searchPill, 16))
+        using (var fill = new SolidBrush(Color.FromArgb(90, 40, 40, 48)))
+            g.FillPath(fill, path);
+        using (var edge = RoundedRectPath(_searchPill, 16))
+        using (var pen = new Pen(Color.FromArgb(71, 255, 255, 255), 1f))
+            g.DrawPath(pen, edge);
+        using var searchFont = new Font("Segoe UI", 13f);
+        using var glyphFont = new Font("Segoe Fluent Icons", 14f);
+        bool empty = string.IsNullOrEmpty(_query);
+        using var glyphBrush = new SolidBrush(empty
+            ? Color.FromArgb(170, 200, 200, 200) : Color.White);
+        using var textBrush = new SolidBrush(empty
+            ? Color.FromArgb(170, 200, 200, 200) : Color.White);
+        g.DrawString("\uE721", glyphFont, glyphBrush, new PointF(_searchPill.X + 12, _searchPill.Y + 7));
+        g.DrawString(empty ? "Search" : _query, searchFont, textBrush,
+            new PointF(_searchPill.X + 38, _searchPill.Y + 7));
+
+        // Grid: fixed 7 x 5.
         _cellRects.Clear();
-        int cols = Math.Max(1, (Width - 160) / CellW);
-        int rows = Math.Max(1, (Height - GridTop - GridBottomPad) / CellH);
-        int perPage = cols * rows;
-        _pageCount = Math.Max(1, (int)Math.Ceiling((double)_filtered.Count / perPage));
+        _pageCount = Math.Max(1, (int)Math.Ceiling((double)_filtered.Count / PerPage));
         _page = Math.Clamp(_page, 0, _pageCount - 1);
-        int gridW = cols * CellW;
+        int gridW = Cols * CellW;
         int x0 = (Width - gridW) / 2;
-        int start = _page * perPage;
-        int count = Math.Min(perPage, _filtered.Count - start);
+        int start = _page * PerPage;
+        int count = Math.Min(PerPage, _filtered.Count - start);
         using var labelFont = new Font("Segoe UI", 10f);
         using var labelBrush = new SolidBrush(Color.White);
         using var shadowBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0));
         var fmt = new StringFormat { Alignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
         for (int i = 0; i < count; i++)
         {
-            int r = i / cols, c = i % cols;
+            int r = i / Cols, c = i % Cols;
             int cx = x0 + c * CellW, cy = GridTop + r * CellH;
             var cell = new Rectangle(cx, cy, CellW, CellH);
             _cellRects.Add(cell);
             var item = _filtered[start + i];
-            var tileRect = new Rectangle(cx + (CellW - TileSize) / 2, cy, TileSize, TileSize);
-            g.DrawImage(GetTile(item), tileRect);
+            var iconRect = new Rectangle(cx + (CellW - TileSize) / 2, cy, TileSize, TileSize);
+            DrawIcon(g, GetIcon(item), iconRect);
             var labelRect = new Rectangle(cx, cy + TileSize + 4, CellW, 20);
             // Soft shadow under the label for readability on any wallpaper.
             g.DrawString(item.Name, labelFont, shadowBrush, new Rectangle(labelRect.X + 1, labelRect.Y + 1, labelRect.Width, labelRect.Height), fmt);
@@ -229,7 +312,7 @@ internal sealed class LaunchpadForm : Form
         }
 
         // Page dots (only when more than one page and not filtering).
-        if (_pageCount > 1 && string.IsNullOrWhiteSpace(_search.Text))
+        if (_pageCount > 1 && string.IsNullOrWhiteSpace(_query))
         {
             int dotGap = 16, dotR = 4;
             int totalW = _pageCount * dotGap - (dotGap - dotR * 2);

@@ -6,17 +6,17 @@ using System.Runtime.InteropServices;
 namespace FrostDock;
 
 /// <summary>
-/// FrostDock dock v1.2: v1.1's layered-window dock (UpdateLayeredWindow,
-/// fixed full-width 140px form, no Region/TransparencyKey/per-frame resize,
-/// WM_NCHITTEST pass-through) plus:
-/// - WALLPAPER-SAMPLED frosted pill (v1.1's DWM blur region did not visibly
-///   frost on the user's screenshots — the pill read as a flat dark slab).
-/// - SQUIRCLE tiles: every icon renders as a uniform rounded-square app
-///   tile; the whole tile magnifies, never just the logo.
-/// - BOTTOM-FLUSH anchoring: Bounds (never WorkingArea), pill bottom 4px
-///   above the screen's bottom edge (v1.1 floated ~20px up: WorkingArea
-///   anchor + pillBottom = FormHeight - Shadow - 2).
-/// - Launchpad + Trash synthetic entries at the dock's right end.
+/// FrostDock dock v1.3 (Argon top-5 scope, on the v1.2 base):
+/// - NO ICON TILES: freeform icons draw directly onto the frosted pill
+///   glass with a subtle drop shadow; full-bleed square artwork is clipped
+///   to a squircle AFTER scaling, so hover can never turn it sharp-cornered.
+/// - COSINE MAGNIFICATION: icons within 2.5 slots of the cursor scale on a
+///   cosine falloff and push their neighbours outward; the pill width is
+///   recomputed from the scaled widths every frame.
+/// - PILL BORDER: a single 1px inner specular highlight (white, alpha 71)
+///   plus the soft outer drop shadow — no double ring.
+/// - v1.2 behaviour kept: wallpaper-sampled frost, bottom-flush anchoring
+///   (Bounds, pill 4px above the screen bottom), Launchpad + Trash entries.
 /// </summary>
 internal sealed class DockForm : Form
 {
@@ -42,7 +42,6 @@ internal sealed class DockForm : Form
     private List<DockApp> _display = new();
     private readonly List<Rectangle> _iconRects = new();
     private readonly Dictionary<string, Bitmap> _iconCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<Bitmap, Bitmap> _tileCache = new();
     private readonly List<int> _sepXs = new();
     private DockApp _launchpadApp = null!;
     private DockApp _trashApp = null!;
@@ -280,13 +279,21 @@ internal sealed class DockForm : Form
         return -1;
     }
 
+    /// <summary>
+    /// v1.3 cosine magnification: icons within 2.5 slots of the cursor X
+    /// scale by 1 + maxBoost * cos(distSlots / 2.5 * PI/2), so the falloff
+    /// is smooth across ~5 neighbours instead of a single-icon step, and
+    /// reaches exactly 1.0 at 2.5 slots. Slot pitch = icon + gap.
+    /// </summary>
     private int IconSizeAt(int index, int[] baseCenters)
     {
         if (!_mouseIn) return BaseSize;
-        double dist = Math.Abs(_mouse.X - baseCenters[index]);
-        double falloff = Math.Max(0, 1 - dist / 130.0);
-        falloff *= falloff;
-        return BaseSize + (int)((MaxSize - BaseSize) * falloff);
+        double pitch = BaseSize + Gap;
+        double distSlots = Math.Abs(_mouse.X - baseCenters[index]) / pitch;
+        if (distSlots >= 2.5) return BaseSize;
+        double boost = (double)(MaxSize - BaseSize) / BaseSize;
+        double scale = 1.0 + boost * Math.Cos(distSlots / 2.5 * Math.PI / 2.0);
+        return (int)Math.Round(BaseSize * scale);
     }
 
     /// <summary>
@@ -359,19 +366,13 @@ internal sealed class DockForm : Form
             }
         }
 
-        // Prune cached icons (and their tiles) for apps that are no longer running.
+        // Prune cached icons for apps that are no longer running.
         var dead = new List<string>();
         foreach (var key in _iconCache.Keys)
             if (!liveKeys.Contains(key)) dead.Add(key);
         foreach (var key in dead)
         {
-            var oldIcon = _iconCache[key];
-            if (_tileCache.TryGetValue(oldIcon, out var oldTile))
-            {
-                try { oldTile.Dispose(); } catch { }
-                _tileCache.Remove(oldIcon);
-            }
-            try { oldIcon.Dispose(); } catch { }
+            try { _iconCache[key].Dispose(); } catch { }
             _iconCache.Remove(key);
         }
 
@@ -385,13 +386,7 @@ internal sealed class DockForm : Form
                 if (_trashFull != full)
                 {
                     _trashFull = full;
-                    var oldTrash = _trashApp.IconBitmap;
                     _trashApp.IconBitmap = LoadTrashIcon();
-                    if (oldTrash != null && _tileCache.TryGetValue(oldTrash, out var oldTrashTile))
-                    {
-                        try { oldTrashTile.Dispose(); } catch { }
-                        _tileCache.Remove(oldTrash);
-                    }
                 }
             }
         }
@@ -414,20 +409,54 @@ internal sealed class DockForm : Form
     }
 
     /// <summary>
-    /// 96px tile for a source icon (cached per source bitmap). Tiles are
-    /// rendered once at 96px and scale-drawn to the on-screen size — max
-    /// magnification is 78px, so this is always a downscale (crisp).
-    /// Launchpad's icon is already finished tile artwork: used as-is.
+    /// v1.3 icon drawing — no dark-grey tile plates anywhere:
+    /// - Finished tile artwork (Launchpad icon): drawn as-is; its corners
+    ///   are already transparent.
+    /// - Full-bleed square artwork (e.g. Settings' blue square): clipped to
+    ///   a squircle path AT the drawn size, so magnification can never turn
+    ///   it into a sharp-cornered square.
+    /// - Freeform artwork (Folder, Chrome, Edge, Recycle Bin, ...): drawn
+    ///   directly onto the frosted pill glass with a subtle drop shadow
+    ///   (black, alpha 80, 2px down) made from the icon's own alpha mask.
     /// </summary>
-    private Bitmap GetTile(DockApp app)
+    private static void DrawDockIcon(Graphics g, DockApp app, Rectangle rect)
     {
-        var icon = app.IconBitmap;
-        if (icon == null) return SquircleTiles.RenderTile(ShellIcons.GenericIcon());
-        if (app.IconIsTile) return icon;
-        if (_tileCache.TryGetValue(icon, out var tile)) return tile;
-        tile = SquircleTiles.RenderTile(icon, 96);
-        _tileCache[icon] = tile;
-        return tile;
+        var icon = app.IconBitmap ?? ShellIcons.GenericIcon();
+        if (app.IconIsTile)
+        {
+            g.DrawImage(icon, rect);
+            return;
+        }
+        if (ShellIcons.IsFullBleedSquare(icon))
+        {
+            int radius = Math.Max(1, rect.Width * 22 / 100);
+            using var clip = RoundedRectPath(rect, radius);
+            var state = g.Save();
+            try
+            {
+                g.SetClip(clip);
+                g.DrawImage(icon, rect);
+            }
+            finally { g.Restore(state); }
+            return;
+        }
+        // Freeform: silhouette shadow 2px down, then the icon itself.
+        var shadowRect = new Rectangle(rect.X, rect.Y + 2, rect.Width, rect.Height);
+        using (var attrs = new ImageAttributes())
+        {
+            // Map RGB -> black, scale alpha to 80/255.
+            var matrix = new ColorMatrix(new float[][]
+            {
+                new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 80f / 255f, 0 },
+                new float[] { 0, 0, 0, 0, 1 },
+            });
+            attrs.SetColorMatrix(matrix);
+            g.DrawImage(icon, shadowRect, 0, 0, icon.Width, icon.Height, GraphicsUnit.Pixel, attrs);
+        }
+        g.DrawImage(icon, rect);
     }
 
     private Bitmap GetCachedIcon(string key, Func<Bitmap> load)
@@ -549,18 +578,15 @@ internal sealed class DockForm : Form
             {
                 using var fill = new SolidBrush(Color.FromArgb(80, 30, 30, 36));
                 g.FillPath(fill, bg);
-                using var outer = new Pen(Color.FromArgb(90, 0, 0, 0), 1f);
-                g.DrawPath(outer, bg);
-                var innerRect = new Rectangle(pill.X + 1, pill.Y + 1, pill.Width - 2, pill.Height - 2);
-                using var innerPath = RoundedRectPath(innerRect, PillRadius - 1);
-                using var grad = new LinearGradientBrush(innerRect,
-                    Color.FromArgb(75, 255, 255, 255), Color.FromArgb(20, 255, 255, 255),
-                    LinearGradientMode.Vertical);
-                using var inner = new Pen(grad, 1f);
-                g.DrawPath(inner, innerPath);
+                // v1.3: ONE 1px inner specular highlight (white, alpha 71 =
+                // rgba(255,255,255,0.28)) — the old outer dark ring + inner
+                // gradient made a heavy "double-tube" outline. The soft
+                // outer drop shadow above stays.
+                using var highlight = new Pen(Color.FromArgb(71, 255, 255, 255), 1f);
+                g.DrawPath(highlight, bg);
             }
 
-            // Tiles, running dots, separators. The WHOLE tile magnifies.
+            // Icons, running dots, separators. The WHOLE icon magnifies.
             _iconRects.Clear();
             _sepXs.Clear();
             int x = pill.X + PadX;
@@ -576,8 +602,7 @@ internal sealed class DockForm : Form
                 int s = sizes[i];
                 var rect = new Rectangle(x, iconBottom - s, s, s);
                 _iconRects.Add(rect);
-                var tile = GetTile(_display[i]);
-                g.DrawImage(tile, rect);
+                DrawDockIcon(g, _display[i], rect);
                 x += s + Gap;
 
                 if (_display[i].IsRunning)
