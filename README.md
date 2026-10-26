@@ -1,26 +1,52 @@
-# FrostDock
+# FrostDock ◆
 
-FrostDock makes Windows look and feel a bit like macOS — without changing
-Windows itself. It is a small, single-file Windows app written in C# that
-adds three things on top of your normal desktop:
+FrostDock is a Windows app that gives your desktop a macOS-style dock and top
+bar, without changing Windows itself. It is a single file, written in C#, and
+nothing is installed — quit FrostDock and your desktop goes exactly back to
+how it was.
 
-- **A dock** at the bottom centre of the screen. App icons magnify when you
-  hover over them, a dot appears under running apps, and clicking an icon
-  launches the app or jumps to its window.
-- **A top bar** across the top of the screen, showing the active app's name,
-  battery level and the clock.
+It is not affiliated with Apple.
+
+## What you get
+
+- **Dock** — a pill at the bottom centre of the screen. Icons magnify as you
+  hover, dots mark running apps. Click an icon to launch an app, focus it, or
+  minimize it back into the dock with a genie animation (click again to
+  restore it). Drag apps out of Launchpad onto the dock to pin them;
+  right-click a pinned icon to unpin it.
+- **Top bar** — the active app's name, Wi-Fi and volume status, battery,
+  clock, and a Control Center button.
+- **Control Center** — volume and brightness sliders, Wi-Fi/Bluetooth status
+  with links to Settings. Status only, never fake toggles.
+- **Launchpad** — a full-screen grid of your apps (Start Menu, Desktop, and
+  Store apps), with search. Open it from the dock icon or with F4.
 - **Quick search** — press Alt+Space (or Ctrl+Space), type an app name,
   press Enter to launch it.
+- **Now Playing** — media controls for whatever is playing, no login needed.
+- **Trash** — the Recycle Bin, at the end of the dock.
 
 Right-click the dock for more: show or hide the top bar, auto-hide the
-Windows taskbar, and exit FrostDock. Nothing is installed — closing FrostDock
-puts your desktop exactly back how it was.
+Windows taskbar, and exit FrostDock.
 
 ## Run it
 
-Download `FrostDock.exe` from the Releases page and double-click it. No
-installer, no admin rights, nothing else to download — the .NET runtime is
-bundled inside the file.
+Download `FrostDock.exe` from the
+[latest release](https://github.com/parthsingh03/FrostDock/releases/latest)
+(or [direct download](https://github.com/parthsingh03/FrostDock/releases/latest/download/FrostDock.exe))
+and double-click it. No installer, no admin rights, nothing else to
+download — the .NET runtime is bundled inside the file. 64-bit Windows 10/11.
+
+## A note on Smart App Control
+
+These builds are unsigned, so Smart App Control may block a brand-new build
+at first, saying it cannot verify the publisher. That block has cleared on
+its own after a few hours in the past (Microsoft reviews the app), so if it
+happens, wait and retry the same file before assuming it is broken. Never
+turn Smart App Control off to get around it — it cannot be turned back on
+without reinstalling Windows.
+
+How signing works for this project is described in
+[docs/CODE-SIGNING-POLICY.md](docs/CODE-SIGNING-POLICY.md).
 
 ## Build it yourself
 
@@ -33,26 +59,28 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 
 The output is a single `FrostDock.exe` for 64-bit Windows.
 
-## A note on Smart App Control
-
-Unsigned builds of FrostDock are blocked by Windows Smart App Control, because
-Smart App Control only trusts apps signed with a valid certificate. Signed
-releases are published here when available; until then, the source code in
-this repo is fully open so anyone can read it and build it themselves.
-
-How FrostDock releases are signed is described in
-[docs/CODE-SIGNING-POLICY.md](docs/CODE-SIGNING-POLICY.md).
-
 ## Project layout
 
 ```
 src/
-  Program.cs        startup, single-instance check, wires the three windows together
-  DockForm.cs       the dock — custom-painted icons, magnification, running dots
-  TopBarForm.cs     the top bar — active app name, battery, clock
-  QuickSearchForm.cs  quick search over Start Menu apps
-  DockApps.cs       finding pinned apps and their icons on the machine
-  NativeMethods.cs  the few Windows API calls (hotkeys, taskbar auto-hide)
+  Program.cs          startup, single-instance check, wires the windows together
+  DockForm.cs         the dock — icons, magnification, running dots, genie toggle, pin drop target
+  TopBarForm.cs       the top bar — active app, status icons, clock, Control Center button
+  ControlCenterForm.cs  Control Center panel — volume/brightness sliders, Wi-Fi/Bluetooth status
+  LaunchpadForm.cs    Launchpad grid, search, drag-to-pin source
+  QuickSearchForm.cs  Alt+Space quick search
+  DockApps.cs         finding apps (Start Menu, Desktop, Store) and their icons
+  ShellIcons.cs       high-res icon extraction, classic-icon fallback
+  SquircleTiles.cs    tile/icon drawing helpers
+  AudioVolume.cs      system volume via Core Audio, legacy mixer fallback
+  BrightnessControl.cs  screen brightness
+  GenieEffect.cs      genie minimize/restore animation
+  GlassStyle.cs       frosted-glass control painting
+  WallpaperBlur.cs    blurred-wallpaper surface behind the dock and Launchpad
+  NowPlaying.cs       media session info for Now Playing
+  PinnedStore.cs      pinned apps saved between runs
+  NativeMethods.cs    the Windows API calls (hotkeys, taskbar, layered windows)
+  FrostDock.csproj    project file
 ```
 
 ## License
